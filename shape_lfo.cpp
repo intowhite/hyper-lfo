@@ -1,4 +1,4 @@
-// Shape LFO v0.3.0 for Expert Sleepers disting NT
+// Shape LFO v0.3.2 for Expert Sleepers disting NT
 // Copyright (c) 2026. MIT license.
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -25,7 +25,11 @@ enum Param {
     // Append only: older preset parameter indices stay stable.
     kSculptBase=kTimeSlotBase+kMaxSegments*3, // curve, amp start/end
     kAddSegment=kSculptBase+kMaxSegments*3,   // momentary action
-    kNumParameters=kAddSegment+1
+    kAmpAnchor=kAddSegment+1,           // retained as legacy preset parameter
+    kTiltSlotBase=kAmpAnchor+1,        // 16*2 tilt/depth settings
+    kCenteredMix=kTiltSlotBase+kMaxSegments*2,
+    kZeroMix=kCenteredMix+1,
+    kNumParameters=kZeroMix+1
 };
 enum Shape { kRampDown=0, kRampUp=1, kSine=2, kSquare=3 };
 static char const* const kShapes[] = {"Ramp down", "Ramp up", "Sine", "Square"};
@@ -42,6 +46,11 @@ static constexpr int kRelativeFactors[] = {1,2,4,8,16,32}; // /4: 1/4..8
 static constexpr int kFixedUnits[] = {4,8,16,32,64,128,256,512};
 static constexpr int kSlewMilliseconds[] = {0,1,2,5,10,20,40,80,160,320,640,1000};
 static char const* const kAddOptions[] = {"Ready", "Add next"};
+static char const* const kAmpAnchors[] = {"Centered", "From zero"};
+// The two unipolar envelope responses are mixed simultaneously. At C=100,
+// Z=0 output is entirely centered; at 0/100 it is entirely 0V-anchored.
+// At 100/100 the responses are blended equally (normalized to avoid clipping).
+// Both weights at zero fall back to centered for a useful neutral state.
 static constexpr int kSlewCount=sizeof(kSlewMilliseconds)/sizeof(kSlewMilliseconds[0]);
 
 // Old parameters retain their exact indices. New per-slot values are separate
@@ -57,6 +66,11 @@ static constexpr int kSlewCount=sizeof(kSlewMilliseconds)/sizeof(kSlewMillisecon
     {"S" #i " curve",-100,100,0,kNT_unitNone,0,nullptr}, \
     {"S" #i " amp start",0,100,100,kNT_unitPercent,0,nullptr}, \
     {"S" #i " amp end",0,100,100,kNT_unitPercent,0,nullptr}
+// Old amp start/end remain hidden in the parameter array for stable indices;
+// v0.3.2 uses the following Tilt/Depth values to generate the envelope.
+#define TILTDEPTH(i) \
+    {"S" #i " tilt",0,100,50,kNT_unitPercent,0,nullptr}, \
+    {"S" #i " depth",0,100,100,kNT_unitPercent,0,nullptr}
 static const _NT_parameter kParameters[] = {
     {"Segments",1,16,4,kNT_unitNone,0,nullptr},
     {"Edit segment",1,16,1,kNT_unitNone,0,nullptr},
@@ -85,21 +99,30 @@ static const _NT_parameter kParameters[] = {
     SCULPT(5), SCULPT(6), SCULPT(7), SCULPT(8),
     SCULPT(9), SCULPT(10), SCULPT(11), SCULPT(12),
     SCULPT(13), SCULPT(14), SCULPT(15), SCULPT(16),
-    {"Add segment",0,1,0,kNT_unitEnum,0,kAddOptions}
+    {"Add segment",0,1,0,kNT_unitEnum,0,kAddOptions},
+    {"Amp anchor (legacy)",0,1,0,kNT_unitEnum,0,kAmpAnchors},
+    TILTDEPTH(1), TILTDEPTH(2), TILTDEPTH(3), TILTDEPTH(4),
+    TILTDEPTH(5), TILTDEPTH(6), TILTDEPTH(7), TILTDEPTH(8),
+    TILTDEPTH(9), TILTDEPTH(10), TILTDEPTH(11), TILTDEPTH(12),
+    TILTDEPTH(13), TILTDEPTH(14), TILTDEPTH(15), TILTDEPTH(16),
+    {"Centered mix",0,100,100,kNT_unitPercent,0,nullptr},
+    {"From zero mix",0,100,0,kNT_unitPercent,0,nullptr}
 };
 #undef SEG
 #undef TIME
 #undef SCULPT
+#undef TILTDEPTH
 static_assert(sizeof(kParameters)/sizeof(kParameters[0]) == kNumParameters,
               "Parameters must match declared indices");
 
 static const uint8_t kMainParams[] = {kBpm,kBaseDivision,kRange,kAmplitude,kOffset};
-static const uint8_t kOutputParams[] = {kOutput,kOutputMode,kSlew,kTestOscillator};
+static const uint8_t kOutputParams[] = {kOutput,kOutputMode,kCenteredMix,kZeroMix,kSlew,kTestOscillator};
 
 struct ShapeLFO : public _NT_algorithm {
     _NT_parameterPage pages[3];
     _NT_parameterPages pageSet;
     uint8_t editParams[10];
+    bool addPending;
     // Integer sample-clock ticks; one tick increment is 8 * BPM.
     // A segment's duration threshold is sampleRate * 15 * units.
     // Here 1 unit means 1/128 bar (1/32 beat).
@@ -110,7 +133,7 @@ struct ShapeLFO : public _NT_algorithm {
     uint32_t testSamples;
     float slewPrevious;
     bool slewStarted;
-    ShapeLFO():segmentTicks(0),lastThreshold(0),currentSegment(0),
+    ShapeLFO():addPending(false),segmentTicks(0),lastThreshold(0),currentSegment(0),
         previewPhase(0.0f),testSamples(0),slewPrevious(0),slewStarted(false) {
         parameters=kParameters;
         v=nullptr;
@@ -120,14 +143,14 @@ struct ShapeLFO : public _NT_algorithm {
         editParams[2]=kSlotBase+1;
         editParams[3]=kTimeSlotBase+1; // relative duration (default)
         editParams[4]=kSculptBase;     // curve
-        editParams[5]=kSculptBase+1;   // amp start
-        editParams[6]=kSculptBase+2;   // amp end
+        editParams[5]=kTiltSlotBase;   // envelope tilt
+        editParams[6]=kTiltSlotBase+1; // envelope depth
         editParams[7]=kTimeSlotBase;   // timing mode (rarely changed)
         editParams[8]=kLength;         // manual count adjustment
         editParams[9]=kAddSegment;     // append a fresh shape
         pages[0]={"Main",5,0,{0,0},kMainParams};
         pages[1]={"Edit",10,0,{0,0},editParams};
-        pages[2]={"Output",4,0,{0,0},kOutputParams};
+        pages[2]={"Output",6,0,{0,0},kOutputParams};
         pageSet={3,pages};
         parameterPages=&pageSet;
     }
@@ -181,8 +204,8 @@ static void updateEditPage(ShapeLFO* s,bool informHost) {
     s->editParams[2]=static_cast<uint8_t>(kSlotBase+2*slot+1);
     s->editParams[3]=static_cast<uint8_t>(timingParam(slot)+(modeAt(s,slot)?2:1));
     s->editParams[4]=static_cast<uint8_t>(kSculptBase+3*slot);
-    s->editParams[5]=static_cast<uint8_t>(kSculptBase+3*slot+1);
-    s->editParams[6]=static_cast<uint8_t>(kSculptBase+3*slot+2);
+    s->editParams[5]=static_cast<uint8_t>(kTiltSlotBase+2*slot);
+    s->editParams[6]=static_cast<uint8_t>(kTiltSlotBase+2*slot+1);
     s->editParams[7]=static_cast<uint8_t>(timingParam(slot));
     if(informHost) {
         int index=NT_algorithmIndex(s);
@@ -207,28 +230,14 @@ static void setHostParam(ShapeLFO* s,int param,int value) {
 }
 static void parameterChanged(_NT_algorithm* alg,int param) {
     ShapeLFO* s=static_cast<ShapeLFO*>(alg);
-    if(param==kAddSegment && s->v[kAddSegment]) {
-        // Reset first: if the host invokes callbacks recursively, we won't add
-        // multiple shapes. Keep the same four-slot demo when first inserted.
-        setHostParam(s,kAddSegment,0);
-        const int oldCount=count(s);
-        if(oldCount<kMaxSegments) {
-            const int slot=oldCount;
-            setHostParam(s,kSlotBase+2*slot,kRampDown);
-            setHostParam(s,kSlotBase+2*slot+1,1);
-            setHostParam(s,timingParam(slot),0);
-            setHostParam(s,timingParam(slot)+1,2);
-            setHostParam(s,timingParam(slot)+2,2);
-            setHostParam(s,kSculptBase+3*slot,0);
-            setHostParam(s,kSculptBase+3*slot+1,100);
-            setHostParam(s,kSculptBase+3*slot+2,100);
-            setHostParam(s,kLength,oldCount+1);
-            setHostParam(s,kSelected,oldCount+1);
-            updateEditPage(s,true);
-        }
+    // IMPORTANT: never call NT_setParameterFromUi from this callback to
+    // manipulate the command that triggered it. The NT may invoke this
+    // while holding a UI/parameter lock. Queue the action for the UI draw.
+    if(param==kAddSegment) {
+        if(s->v[kAddSegment])s->addPending=true;
         return;
     }
-    if(param==kSelected || (param>=kTimeSlotBase &&
+    if(param==kSelected || (param>=kTimeSlotBase && param<kSculptBase &&
        ((param-kTimeSlotBase)%3)==0 &&
        ((param-kTimeSlotBase)/3)==selected(s))) updateEditPage(s,true);
     if(param==kLength && s->currentSegment>=count(s)) {
@@ -238,6 +247,33 @@ static void parameterChanged(_NT_algorithm* alg,int param) {
     }
     if(param==kTestOscillator && s->v[kTestOscillator])s->testSamples=0;
     if(param==kSlew && s->v[kSlew]==0)s->slewStarted=false;
+}
+
+// Apply a queued UI command outside parameterChanged(), avoiding nested
+// host parameter writes while the NT is processing a knob change.
+// This runs from draw() on the UI side, not from the audio callback.
+static void consumeAddRequest(ShapeLFO* s) {
+    if(!s->addPending)return;
+    s->addPending=false;
+    if(!s->v[kAddSegment])return;
+    const int oldCount=count(s);
+    // Restore the momentary command before any other edits.
+    setHostParam(s,kAddSegment,0);
+    if(oldCount>=kMaxSegments)return;
+    const int slot=oldCount;
+    setHostParam(s,kSlotBase+2*slot,kRampDown);
+    setHostParam(s,kSlotBase+2*slot+1,1);
+    setHostParam(s,timingParam(slot),0);
+    setHostParam(s,timingParam(slot)+1,2);
+    setHostParam(s,timingParam(slot)+2,2);
+    setHostParam(s,kSculptBase+3*slot,0);
+    setHostParam(s,kSculptBase+3*slot+1,100); // legacy defaults
+    setHostParam(s,kSculptBase+3*slot+2,100);
+    setHostParam(s,kTiltSlotBase+2*slot,50);  // flat envelope
+    setHostParam(s,kTiltSlotBase+2*slot+1,100); // full depth
+    setHostParam(s,kLength,oldCount+1);
+    setHostParam(s,kSelected,oldCount+1);
+    // Selection parameterChanged calls updateEditPage through the host.
 }
 
 // Small single-cycle sine LUT. No libm required on the embedded target.
@@ -270,15 +306,42 @@ static inline float waveform(int shape,float t,int curve=0) {
 // Normalize a point on the entire chain to its duration-weighted segment.
 // Amplitude envelope interpolates continuously over the whole segment.
 // A four-repeat ramp with Start=100, End=0 creates a shrinking burst.
+// Tilt: 0 = 100% -> 0%, 50 = flat, 100 = 0% -> 100%.
+// Depth scales the resulting envelope, and is per-segment (not global).
+// The envelope is continuous across all repetitions within a segment.
+static inline float amplitudeAt(const ShapeLFO* s,int slot,float inside) {
+    const int base=kTiltSlotBase+2*slot;
+    const float tilt=clampf(static_cast<float>(s->v[base])*0.01f,0.0f,1.0f);
+    const float depth=clampf(static_cast<float>(s->v[base+1])*0.01f,0.0f,1.0f);
+    const float start=(tilt<=0.5f)?1.0f:(2.0f-2.0f*tilt);
+    const float end=(tilt>=0.5f)?1.0f:(2.0f*tilt);
+    return depth*(start+(end-start)*inside);
+}
+static inline float zeroMixFraction(const ShapeLFO* s) {
+    if(s->v[kRange]==0)return 0.0f; // Both anchors converge in +/-5V mode.
+    const int center=s->v[kCenteredMix];
+    const int zero=s->v[kZeroMix];
+    const int sum=center+zero;
+    if(sum<=0)return 0.0f;
+    return static_cast<float>(zero)/static_cast<float>(sum);
+}
 static inline float shapedAt(const ShapeLFO* s,int slot,float inside) {
     const int r=repeatsAt(s,slot);
     float p=inside*static_cast<float>(r);
     p-=static_cast<float>(static_cast<int>(p));
     const int base=kSculptBase+3*slot;
-    const float start=static_cast<float>(s->v[base+1])*0.01f;
-    const float end=static_cast<float>(s->v[base+2])*0.01f;
-    return waveform(shapeAt(s,slot),p,s->v[base])*
-           (start+(end-start)*inside);
+    return waveform(shapeAt(s,slot),p,s->v[base])*amplitudeAt(s,slot,inside);
+}
+static float previewAt(const ShapeLFO* s,int slot,float inside) {
+    const float signedWave=shapedAt(s,slot,inside);
+    // Mix centered signed [-1,+1] with 0V-anchored unipolar [0,+1].
+    // Normalized weights make "100/100" a 50/50 blend without clipping.
+    const float blend=zeroMixFraction(s);
+    if(blend>0.0f) {
+        const float fromZero=0.5f*(signedWave+amplitudeAt(s,slot,inside));
+        return (1.0f-blend)*signedWave+blend*fromZero;
+    }
+    return signedWave;
 }
 static float evaluateAtUnits(const ShapeLFO* s,float position,int* activeSlot) {
     int n=count(s);
@@ -287,19 +350,26 @@ static float evaluateAtUnits(const ShapeLFO* s,float position,int* activeSlot) {
         if(position < duration || slot==n-1) {
             float inside=clampf(position/duration,0.0f,0.999999f);
             if(activeSlot)*activeSlot=slot;
-            return shapedAt(s,slot,inside);
+            return previewAt(s,slot,inside);
         }
         position-=duration;
     }
     if(activeSlot)*activeSlot=0;
     return 0.0f;
 }
-static float scaleOutput(const ShapeLFO* s,float wave) {
+static float scaleOutput(const ShapeLFO* s,float wave,float envelope) {
     float center=0.0f,radius=5.0f;
     if(s->v[kRange]==1){center=2.5f;radius=2.5f;}
     else if(s->v[kRange]==2){center=5.0f;radius=5.0f;}
-    float volts=center+radius*(s->v[kAmplitude]*0.01f)*wave
-                +s->v[kOffset]*0.001f;
+    const float amp=s->v[kAmplitude]*0.01f;
+    // Both responses have the same waveform component, but different baseline
+    // behavior as envelope grows or decays. A/B: C=100,Z=0 or C=0,Z=100.
+    // Blend: C=100,Z=100 mixes both equally; this is NOT additive gain.
+    const float blend=zeroMixFraction(s);
+    const float centeredVolts=center+radius*amp*wave;
+    const float fromZeroVolts=radius*amp*(envelope+wave);
+    float volts=centeredVolts*(1.0f-blend)+fromZeroVolts*blend;
+    volts+=s->v[kOffset]*0.001f;
     return clampf(volts,-10.0f,10.0f);
 }
 // Changes to master division or the current segment's duration rescale
@@ -346,6 +416,7 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     const uint32_t clockIncrement=static_cast<uint32_t>(8*bpm);
     for(int i=0;i<frames;++i) {
         float wave;
+        float envelope=1.0f;
         if(s->v[kTestOscillator]) {
             wave=testSamples<halfTestCycle?1.0f:-1.0f;
             ++testSamples;
@@ -353,8 +424,9 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
         } else {
             const float fractional=static_cast<float>(ticks)*invThreshold;
             wave=shapedAt(s,slot,fractional);
+            envelope=amplitudeAt(s,slot,fractional);
         }
-        float volts=scaleOutput(s,wave);
+        float volts=scaleOutput(s,wave,envelope);
         if(maxSlew>0.0f) {
             if(!started) {previous=volts;started=true;}
             float delta=volts-previous;
@@ -416,19 +488,23 @@ static bool draw(_NT_algorithm* alg) {
     ShapeLFO* s=static_cast<ShapeLFO*>(alg);
     int n=count(s);
     int choice=selected(s);
+    // Process queued Add on a later UI callback, never while the host is
+    // handling the parameterChanged() event that requested it.
+    consumeAddRequest(s);
+    n=count(s);choice=selected(s);
     char left[64];
     lengthText(left,totalUnits(s));
-    // Both NT's top parameter overlay and default lower button-help overlay
-    // can be active. Reserve the middle-upper strip for readable status.
-    NT_drawText(3,18,left,13,kNT_textLeft,kNT_textTiny);
+    // Large waveform takes priority. The NT help overlay may cover these
+    // bottom status labels while a control is touched; that is acceptable.
+    NT_drawText(3,58,left,11,kNT_textLeft,kNT_textTiny);
     char right[32];
     char* r=right;
     *r++='S';appendInt(r,choice+1);
     *r++=' ';*r++='x';appendInt(r,repeatsAt(s,choice));
     *r++=' ';appendText(r,modeAt(s,choice)?"FIX":"REL");*r=0;
-    NT_drawText(251,18,s->v[kTestOscillator]?"TEST 2HZ":right,14,kNT_textRight,kNT_textTiny);
-    const int x0=4,x1=251,y0=24,y1=41;
-    constexpr int kWaveCenter=32, kWaveHeight=8;
+    NT_drawText(251,58,s->v[kTestOscillator]?"TEST 2HZ":right,14,kNT_textRight,kNT_textTiny);
+    const int x0=4,x1=251,y0=15,y1=49;
+    constexpr int kWaveCenter=32, kWaveHeight=14;
     NT_drawShapeI(kNT_line,x0,kWaveCenter,x1,kWaveCenter,3);
     const int total=totalUnits(s);
     int start=0;
@@ -456,7 +532,7 @@ static bool draw(_NT_algorithm* alg) {
         int yPrev=kWaveCenter-static_cast<int>(prevWave*kWaveHeight);
         int y=kWaveCenter-static_cast<int>(nextWave*kWaveHeight);
         if(oldSlot!=newSlot && newSlot<n) {
-            int endY=kWaveCenter-static_cast<int>(shapedAt(s,oldSlot,0.999999f)*kWaveHeight);
+            int endY=kWaveCenter-static_cast<int>(previewAt(s,oldSlot,0.999999f)*kWaveHeight);
             NT_drawShapeI(kNT_line,x0+x-1,yPrev,x0+x,endY,14);
             NT_drawShapeI(kNT_line,x0+x,endY,x0+x,y,14);
         } else {
@@ -464,13 +540,13 @@ static bool draw(_NT_algorithm* alg) {
         }
     }
     int cursor=x0+static_cast<int>(s->previewPhase*(x1-x0));
-    NT_drawShapeI(kNT_line,cursor,23,cursor,42,9);
+    NT_drawShapeI(kNT_line,cursor,14,cursor,50,9);
     return false;
 }
 
 static const _NT_factory kFactory={
     NT_MULTICHAR('S','L','F','1'),
-    "Shape LFO", "Clocked multi-segment shape LFO (v0.3.0)",
+    "Shape LFO", "Clocked multi-segment shape LFO (v0.3.2)",
     0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
     draw,nullptr,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
     nullptr,nullptr,nullptr,nullptr,nullptr,nullptr
