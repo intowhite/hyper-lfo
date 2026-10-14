@@ -1,4 +1,4 @@
-// Shape LFO v0.3.3 for Expert Sleepers disting NT
+// Shape LFO v0.3.4 for Expert Sleepers disting NT
 // Copyright (c) 2026. MIT license.
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -31,7 +31,8 @@ enum Param {
     kZeroMix=kCenteredMix+1,
     // Keep legacy global mixes at their original IDs for old NT presets.
     kAnchorSlotBase=kZeroMix+1,           // 16 independent fade anchors
-    kNumParameters=kAnchorSlotBase+kMaxSegments
+    kPulseWidthSlotBase=kAnchorSlotBase+kMaxSegments, // 16 square duty values
+    kNumParameters=kPulseWidthSlotBase+kMaxSegments
 };
 enum Shape { kRampDown=0, kRampUp=1, kSine=2, kSquare=3 };
 static char const* const kShapes[] = {"Ramp down", "Ramp up", "Sine", "Square"};
@@ -49,9 +50,10 @@ static constexpr int kFixedUnits[] = {4,8,16,32,64,128,256,512};
 static constexpr int kSlewMilliseconds[] = {0,1,2,5,10,20,40,80,160,320,640,1000};
 static char const* const kAddOptions[] = {"Ready", "Add next"};
 static char const* const kAmpAnchors[] = {"Centered", "From zero"};
-// Per-segment Anchor morphs the envelope baseline from output midpoint
-// (0%) to 0V (100%), with 50% mixing both equally. It does not change
-// the bipolar -5V..+5V output mode. No longer a global Output mix.
+// Per-segment Anchor is signed, preserving old stored settings:
+// -100 = top of selected voltage range, 0 = midpoint, +100 = bottom.
+// Amplitude decays/swells toward the selected anchor, including in bipolar mode.
+// On 0..10V: Top=10V, Center=5V, Bottom=0V.
 static constexpr int kSlewCount=sizeof(kSlewMilliseconds)/sizeof(kSlewMilliseconds[0]);
 
 // Old parameters retain their exact indices. New per-slot values are separate
@@ -72,7 +74,8 @@ static constexpr int kSlewCount=sizeof(kSlewMilliseconds)/sizeof(kSlewMillisecon
 #define TILTDEPTH(i) \
     {"S" #i " tilt",0,100,50,kNT_unitPercent,0,nullptr}, \
     {"S" #i " depth",0,100,100,kNT_unitPercent,0,nullptr}
-#define ANCHOR(i) {"S" #i " anchor",0,100,0,kNT_unitPercent,0,nullptr}
+#define ANCHOR(i) {"S" #i " anchor",-100,100,0,kNT_unitPercent,0,nullptr}
+#define WIDTH(i) {"S" #i " width",5,95,50,kNT_unitPercent,0,nullptr}
 static const _NT_parameter kParameters[] = {
     {"Segments",1,16,4,kNT_unitNone,0,nullptr},
     {"Edit segment",1,16,1,kNT_unitNone,0,nullptr},
@@ -112,13 +115,18 @@ static const _NT_parameter kParameters[] = {
     ANCHOR(1), ANCHOR(2), ANCHOR(3), ANCHOR(4),
     ANCHOR(5), ANCHOR(6), ANCHOR(7), ANCHOR(8),
     ANCHOR(9), ANCHOR(10), ANCHOR(11), ANCHOR(12),
-    ANCHOR(13), ANCHOR(14), ANCHOR(15), ANCHOR(16)
+    ANCHOR(13), ANCHOR(14), ANCHOR(15), ANCHOR(16),
+    WIDTH(1), WIDTH(2), WIDTH(3), WIDTH(4),
+    WIDTH(5), WIDTH(6), WIDTH(7), WIDTH(8),
+    WIDTH(9), WIDTH(10), WIDTH(11), WIDTH(12),
+    WIDTH(13), WIDTH(14), WIDTH(15), WIDTH(16)
 };
 #undef SEG
 #undef TIME
 #undef SCULPT
 #undef TILTDEPTH
 #undef ANCHOR
+#undef WIDTH
 static_assert(sizeof(kParameters)/sizeof(kParameters[0]) == kNumParameters,
               "Parameters must match declared indices");
 
@@ -149,10 +157,10 @@ struct ShapeLFO : public _NT_algorithm {
         editParams[1]=kSlotBase;
         editParams[2]=kSlotBase+1;
         editParams[3]=kTimeSlotBase+1; // relative duration (default)
-        editParams[4]=kSculptBase;     // curve
+        editParams[4]=kSculptBase;     // context: Curve on ramps, Width on square
         editParams[5]=kTiltSlotBase;   // envelope tilt
         editParams[6]=kTiltSlotBase+1; // envelope depth
-        editParams[7]=kAnchorSlotBase; // fade toward midpoint or zero, per segment
+        editParams[7]=kAnchorSlotBase; // -100 top, 0 center, +100 bottom
         editParams[8]=kTimeSlotBase;   // timing mode (rarely changed)
         editParams[9]=kLength;         // manual count adjustment
         editParams[10]=kAddSegment;    // append a fresh shape
@@ -206,16 +214,27 @@ static int totalUnits(const ShapeLFO* s) {
     for(int i=0;i<count(s);++i)sum+=durationUnits(s,i);
     return sum > 0 ? sum : 1;
 }
+// Keep the often-used controls at the front, and show only shape-relevant
+// detail: Curve for ramps, Width for square, nothing for sine.
 static void updateEditPage(ShapeLFO* s,bool informHost) {
     const int slot=selected(s);
-    s->editParams[1]=static_cast<uint8_t>(kSlotBase+2*slot);
-    s->editParams[2]=static_cast<uint8_t>(kSlotBase+2*slot+1);
-    s->editParams[3]=static_cast<uint8_t>(timingParam(slot)+(modeAt(s,slot)?2:1));
-    s->editParams[4]=static_cast<uint8_t>(kSculptBase+3*slot);
-    s->editParams[5]=static_cast<uint8_t>(kTiltSlotBase+2*slot);
-    s->editParams[6]=static_cast<uint8_t>(kTiltSlotBase+2*slot+1);
-    s->editParams[7]=static_cast<uint8_t>(kAnchorSlotBase+slot);
-    s->editParams[8]=static_cast<uint8_t>(timingParam(slot));
+    int next=0;
+    s->editParams[next++]=static_cast<uint8_t>(kSelected);
+    s->editParams[next++]=static_cast<uint8_t>(kSlotBase+2*slot);
+    s->editParams[next++]=static_cast<uint8_t>(kSlotBase+2*slot+1);
+    s->editParams[next++]=static_cast<uint8_t>(timingParam(slot)+(modeAt(s,slot)?2:1));
+    const int shape=shapeAt(s,slot);
+    if(shape==kSquare)
+        s->editParams[next++]=static_cast<uint8_t>(kPulseWidthSlotBase+slot);
+    else if(shape==kRampDown || shape==kRampUp)
+        s->editParams[next++]=static_cast<uint8_t>(kSculptBase+3*slot);
+    s->editParams[next++]=static_cast<uint8_t>(kTiltSlotBase+2*slot);
+    s->editParams[next++]=static_cast<uint8_t>(kTiltSlotBase+2*slot+1);
+    s->editParams[next++]=static_cast<uint8_t>(kAnchorSlotBase+slot);
+    s->editParams[next++]=static_cast<uint8_t>(timingParam(slot));
+    s->editParams[next++]=static_cast<uint8_t>(kLength);
+    s->editParams[next++]=static_cast<uint8_t>(kAddSegment);
+    s->pages[1].numParams=static_cast<uint8_t>(next);
     if(informHost) {
         int index=NT_algorithmIndex(s);
         if(index>=0)NT_updateParameterPages(static_cast<uint32_t>(index));
@@ -246,7 +265,8 @@ static void parameterChanged(_NT_algorithm* alg,int param) {
         if(s->v[kAddSegment])s->addPending=true;
         return;
     }
-    if(param==kSelected || (param>=kTimeSlotBase && param<kSculptBase &&
+    if(param==kSelected || param==kSlotBase+2*selected(s) ||
+       (param>=kTimeSlotBase && param<kSculptBase &&
        ((param-kTimeSlotBase)%3)==0 &&
        ((param-kTimeSlotBase)/3)==selected(s))) updateEditPage(s,true);
     if(param==kLength && s->currentSegment>=count(s)) {
@@ -281,6 +301,7 @@ static void consumeAddRequest(ShapeLFO* s) {
     setHostParam(s,kTiltSlotBase+2*slot,50);  // flat envelope
     setHostParam(s,kTiltSlotBase+2*slot+1,100); // full depth
     setHostParam(s,kAnchorSlotBase+slot,0);      // centered fade by default
+    setHostParam(s,kPulseWidthSlotBase+slot,50); // 50% square duty
     setHostParam(s,kLength,oldCount+1);
     setHostParam(s,kSelected,oldCount+1);
     // Selection parameterChanged calls updateEditPage through the host.
@@ -302,11 +323,11 @@ static inline float bendRamp(float t,int curve) {
     float x=u*u; x*=x;
     return t+(1.0f-x-t)*amount; // fast start, slow finish
 }
-static inline float waveform(int shape,float t,int curve=0) {
+static inline float waveform(int shape,float t,int curve=0,int width=50) {
     t=clampf(t,0.0f,0.999999f);
     if(shape==kRampDown)return 1.0f-2.0f*bendRamp(t,curve);
     if(shape==kRampUp)return 2.0f*bendRamp(t,curve)-1.0f;
-    if(shape==kSquare)return t<0.5f?1.0f:-1.0f;
+    if(shape==kSquare)return t < static_cast<float>(width)*0.01f ? 1.0f:-1.0f;
     float p=t*256.0f;
     int i=static_cast<int>(p);
     if(i<0)i=0;
@@ -327,30 +348,31 @@ static inline float amplitudeAt(const ShapeLFO* s,int slot,float inside) {
     const float end=(tilt>=0.5f)?1.0f:(2.0f*tilt);
     return depth*(start+(end-start)*inside);
 }
-// Anchor is independently editable for every segment:
-// 0% = fade toward output-range midpoint (2.5/5V),
-// 50% = equal mixture, 100% = fade toward 0V.
-// The two responses deliberately coincide in bipolar mode.
+// Signed anchor: -100 Top, 0 Center, +100 Bottom. The magnitude is
+// how far the target lies from the voltage midpoint. Default 0 preserves
+// the existing centered sound; existing 0..100 presets still work.
 static inline float anchorAt(const ShapeLFO* s,int slot) {
-    return s->v[kRange]==0 ? 0.0f :
-        clampf(static_cast<float>(s->v[kAnchorSlotBase+slot])*0.01f,0.0f,1.0f);
+    return clampf(static_cast<float>(s->v[kAnchorSlotBase+slot])*0.01f,-1.0f,1.0f);
 }
 static inline float shapedAt(const ShapeLFO* s,int slot,float inside) {
     const int r=repeatsAt(s,slot);
     float p=inside*static_cast<float>(r);
     p-=static_cast<float>(static_cast<int>(p));
     const int base=kSculptBase+3*slot;
-    return waveform(shapeAt(s,slot),p,s->v[base])*amplitudeAt(s,slot,inside);
+    return waveform(shapeAt(s,slot),p,s->v[base],
+                    s->v[kPulseWidthSlotBase+slot])*amplitudeAt(s,slot,inside);
 }
 static float scaleOutput(const ShapeLFO* s,float wave,float envelope,int slot) {
     float center=0.0f,radius=5.0f;
     if(s->v[kRange]==1){center=2.5f;radius=2.5f;}
     else if(s->v[kRange]==2){center=5.0f;radius=5.0f;}
     const float amp=s->v[kAmplitude]*0.01f;
-    const float anchor=anchorAt(s,slot);
-    const float centeredVolts=center+radius*amp*wave;
-    const float zeroVolts=radius*amp*(envelope+wave);
-    float volts=centeredVolts*(1.0f-anchor)+zeroVolts*anchor;
+    // `wave` already includes the segment envelope. When envelope=1 and
+    // amp=100%, all anchor positions produce the same full-range waveform.
+    // As amplitude decreases, the waveform converges toward `base`:
+    // bottom=0V, center=5V, top=10V in a 0..10V range.
+    const float base=center-radius*anchorAt(s,slot);
+    float volts=base+amp*(radius*wave+(center-base)*envelope);
     volts+=s->v[kOffset]*0.001f;
     return clampf(volts,-10.0f,10.0f);
 }
@@ -559,7 +581,7 @@ static bool draw(_NT_algorithm* alg) {
 
 static const _NT_factory kFactory={
     NT_MULTICHAR('S','L','F','1'),
-    "Shape LFO", "Clocked multi-segment shape LFO (v0.3.3)",
+    "Shape LFO", "Clocked multi-segment shape LFO (v0.3.4)",
     0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
     draw,nullptr,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
     nullptr,nullptr,nullptr,nullptr,nullptr,nullptr
