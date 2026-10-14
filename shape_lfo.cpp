@@ -1,4 +1,4 @@
-// Shape LFO v0.4.2 for Expert Sleepers disting NT
+// Shape LFO v0.5.0 experimental for Expert Sleepers disting NT
 // Copyright (c) 2026. MIT license.
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -12,8 +12,8 @@ inline void* operator new(size_t, void* p) noexcept { return p; }
 namespace {
 constexpr int kMaxSegments = 16;
 
-// Existing parameter IDs remain unchanged so older NT presets can migrate.
-// In v0.2 the per-segment timing values are appended after the original 41.
+// Legacy numeric IDs below are local DSP adapter identifiers ONLY.
+// The NT host uses the compact SharedParameter list in v0.5.
 enum Param {
     kLength=0, kSelected, kBpm, kRange, kAmplitude, kOffset,
     kOutput, kOutputMode,
@@ -22,7 +22,7 @@ enum Param {
     kBaseDivision=kTestOscillator+1,
     kSlew,
     kTimeSlotBase,                      // 16 * 3: mode/relative/fixed
-    // Append only: older preset parameter indices stay stable.
+    // Historical layout retained only to reuse the verified DSP functions.
     kSculptBase=kTimeSlotBase+kMaxSegments*3, // curve, amp start/end
     kAddSegment=kSculptBase+kMaxSegments*3,   // momentary action
     kAmpAnchor=kAddSegment+1,           // retained as legacy preset parameter
@@ -67,317 +67,226 @@ static char const* const kAmpAnchors[] = {"Centered", "From zero"};
 // On 0..10V: Top=10V, Center=5V, Bottom=0V.
 static constexpr int kSlewCount=sizeof(kSlewMilliseconds)/sizeof(kSlewMilliseconds[0]);
 
-// Old parameters retain their exact indices. New per-slot values are separate
-// host-owned parameters, so storing a whole NT preset saves every segment.
-#define SEG(i, shape, repeats) \
-    {"S" #i " shape",0,7,shape,kNT_unitEnum,0,kShapes}, \
-    {"S" #i " repeats",1,8,repeats,kNT_unitNone,0,nullptr}
-#define TIME(i) \
-    {"S" #i " timing",0,1,0,kNT_unitEnum,0,kModes}, \
-    {"S" #i " duration",0,5,2,kNT_unitEnum,0,kRelativeDurations}, \
-    {"S" #i " duration",0,7,2,kNT_unitEnum,0,kFixedDurations}
-#define SCULPT(i) \
-    {"S" #i " curve",-100,100,0,kNT_unitNone,0,nullptr}, \
-    {"S" #i " amp start",0,100,100,kNT_unitPercent,0,nullptr}, \
-    {"S" #i " amp end",0,100,100,kNT_unitPercent,0,nullptr}
-// Old amp start/end remain hidden in the parameter array for stable indices;
-// v0.3.2 uses the following Tilt/Depth values to generate the envelope.
-#define TILTDEPTH(i) \
-    {"S" #i " pinch",0,100,50,kNT_unitHasStrings,0,nullptr}, \
-    {"S" #i " depth",0,100,100,kNT_unitPercent,0,nullptr}
-#define ANCHOR(i) {"S" #i " pinch height",-100,100,0,kNT_unitHasStrings,0,nullptr}
-#define WIDTH(i) {"S" #i " pulse width",5,95,50,kNT_unitPercent,0,nullptr}
-#define STEPCOUNT(i) {"S" #i " steps",2,16,8,kNT_unitNone,0,nullptr}
-#define STEPCONTOUR(i) {"S" #i " contour",0,3,0,kNT_unitEnum,0,kStepContours}
-static const _NT_parameter kParameters[] = {
-    {"Segments",1,16,4,kNT_unitNone,0,nullptr},
-    {"Edit segment",1,16,1,kNT_unitNone,0,nullptr},
-    {"Internal BPM",20,300,120,kNT_unitBPM,0,nullptr},
-    {"Voltage",0,2,0,kNT_unitEnum,0,kRanges},
-    {"Amplitude",0,100,100,kNT_unitPercent,0,nullptr},
-    {"Offset",-5000,5000,0,kNT_unitMillivolts,0,nullptr},
-    {"CV out",1,kNT_lastBus,13,kNT_unitCvOutput,0,nullptr},
-    {"Output mode",0,1,1,kNT_unitOutputMode,0,nullptr},
-    SEG(1,kRampDown,1), SEG(2,kRampDown,4),
-    SEG(3,kSine,1), SEG(4,kRampUp,1),
-    SEG(5,kRampDown,1), SEG(6,kRampDown,1),
-    SEG(7,kRampDown,1), SEG(8,kRampDown,1),
-    SEG(9,kRampDown,1), SEG(10,kRampDown,1),
-    SEG(11,kRampDown,1), SEG(12,kRampDown,1),
-    SEG(13,kRampDown,1), SEG(14,kRampDown,1),
-    SEG(15,kRampDown,1), SEG(16,kRampDown,1),
-    {"Test oscillator",0,1,0,kNT_unitEnum,0,kTestModes},
-    {"Base division",0,5,3,kNT_unitEnum,0,kBaseDivisions},
-    {"Output slew",0,kSlewCount-1,0,kNT_unitEnum,0,kSlewTimes},
-    TIME(1), TIME(2), TIME(3), TIME(4),
-    TIME(5), TIME(6), TIME(7), TIME(8),
-    TIME(9), TIME(10), TIME(11), TIME(12),
-    TIME(13), TIME(14), TIME(15), TIME(16),
-    SCULPT(1), SCULPT(2), SCULPT(3), SCULPT(4),
-    SCULPT(5), SCULPT(6), SCULPT(7), SCULPT(8),
-    SCULPT(9), SCULPT(10), SCULPT(11), SCULPT(12),
-    SCULPT(13), SCULPT(14), SCULPT(15), SCULPT(16),
-    // Signed momentary action: left=-1 removes LAST, right=+1 appends.
-    // kNT_unitNone avoids relying on enum-string indexing for negative values.
-    // Keep neutral=0 to preserve old saved states and parameter IDs.
-    {"Squish",-100,100,0,kNT_unitPercent,0,nullptr},
-    {"Warp",-45,45,0,kNT_unitNone,0,nullptr},
-    TILTDEPTH(1), TILTDEPTH(2), TILTDEPTH(3), TILTDEPTH(4),
-    TILTDEPTH(5), TILTDEPTH(6), TILTDEPTH(7), TILTDEPTH(8),
-    TILTDEPTH(9), TILTDEPTH(10), TILTDEPTH(11), TILTDEPTH(12),
-    TILTDEPTH(13), TILTDEPTH(14), TILTDEPTH(15), TILTDEPTH(16),
-    {"Centered mix (legacy)",0,100,100,kNT_unitPercent,0,nullptr},
-    {"From zero mix (legacy)",0,100,0,kNT_unitPercent,0,nullptr},
-    ANCHOR(1), ANCHOR(2), ANCHOR(3), ANCHOR(4),
-    ANCHOR(5), ANCHOR(6), ANCHOR(7), ANCHOR(8),
-    ANCHOR(9), ANCHOR(10), ANCHOR(11), ANCHOR(12),
-    ANCHOR(13), ANCHOR(14), ANCHOR(15), ANCHOR(16),
-    WIDTH(1), WIDTH(2), WIDTH(3), WIDTH(4),
-    WIDTH(5), WIDTH(6), WIDTH(7), WIDTH(8),
-    WIDTH(9), WIDTH(10), WIDTH(11), WIDTH(12),
-    WIDTH(13), WIDTH(14), WIDTH(15), WIDTH(16),
-    {"Add/Remove",1,16,4,kNT_unitNone,0,nullptr},
-    {"Reset segment",0,1,0,kNT_unitConfirm,0,nullptr},
-    STEPCOUNT(1), STEPCOUNT(2), STEPCOUNT(3), STEPCOUNT(4),
-    STEPCOUNT(5), STEPCOUNT(6), STEPCOUNT(7), STEPCOUNT(8),
-    STEPCOUNT(9), STEPCOUNT(10), STEPCOUNT(11), STEPCOUNT(12),
-    STEPCOUNT(13), STEPCOUNT(14), STEPCOUNT(15), STEPCOUNT(16),
-    STEPCONTOUR(1), STEPCONTOUR(2), STEPCONTOUR(3), STEPCONTOUR(4),
-    STEPCONTOUR(5), STEPCONTOUR(6), STEPCONTOUR(7), STEPCONTOUR(8),
-    STEPCONTOUR(9), STEPCONTOUR(10), STEPCONTOUR(11), STEPCONTOUR(12),
-    STEPCONTOUR(13), STEPCONTOUR(14), STEPCONTOUR(15), STEPCONTOUR(16)
+
+// v0.5: the NT sees one shared editor, not 16 copies of every segment.
+// The segment bank is stored inside each algorithm instance.
+// This build validates the architecture. See README for persistence status.
+enum SharedParameter {
+ pSegments=0,pSelected,pBpm,pRange,pAmplitude,pOffset,pOutput,pOutputMode,
+ pTest,pBaseDivision,pSlew,pWarp,pSquish,
+ pShape,pRepeats,pRelDuration,pFixedDuration,pTiming,pCurve,pPinch,pHeight,
+ pDepth,pWidth,pSteps,pContour,pEditCount,pReset,pCount
 };
-#undef SEG
-#undef TIME
-#undef SCULPT
-#undef TILTDEPTH
-#undef ANCHOR
-#undef WIDTH
-#undef STEPCOUNT
-#undef STEPCONTOUR
-static_assert(kNumParameters <= 241, "Do not exceed NT hardware-validated parameter budget before storage refactor");
-static_assert(sizeof(kParameters)/sizeof(kParameters[0]) == kNumParameters,
-              "Parameters must match declared indices");
-
-static const uint8_t kMainParams[] = {kBpm,kBaseDivision,kRange,kAmplitude,kOffset};
-static const uint8_t kOutputParams[] = {kOutput,kOutputMode,kSlew,kTestOscillator};
-static const uint8_t kShapeFxParams[] = {kWarp,kSquish};
-
+static const _NT_parameter kSharedDefaults[pCount]={
+ {"Segments",1,16,4,kNT_unitNone,0,nullptr},
+ {"Edit segment",1,16,1,kNT_unitNone,0,nullptr},
+ {"Internal BPM",20,300,120,kNT_unitBPM,0,nullptr},
+ {"Voltage",0,2,0,kNT_unitEnum,0,kRanges},
+ {"Amplitude",0,100,100,kNT_unitPercent,0,nullptr},
+ {"Offset",-5000,5000,0,kNT_unitMillivolts,0,nullptr},
+ {"CV out",1,kNT_lastBus,13,kNT_unitCvOutput,0,nullptr},
+ {"Output mode",0,1,1,kNT_unitOutputMode,0,nullptr},
+ {"Test oscillator",0,1,0,kNT_unitEnum,0,kTestModes},
+ {"Base division",0,5,3,kNT_unitEnum,0,kBaseDivisions},
+ {"Output slew",0,kSlewCount-1,0,kNT_unitEnum,0,kSlewTimes},
+ {"Warp",-45,45,0,kNT_unitNone,0,nullptr},
+ {"Squish",-100,100,0,kNT_unitPercent,0,nullptr},
+ {"Shape",0,7,kRampDown,kNT_unitEnum,0,kShapes},
+ {"Repeats",1,8,1,kNT_unitNone,0,nullptr},
+ {"Duration",0,5,2,kNT_unitEnum,0,kRelativeDurations},
+ {"Duration",0,7,2,kNT_unitEnum,0,kFixedDurations},
+ {"Timing",0,1,0,kNT_unitEnum,0,kModes},
+ {"Curve",-100,100,0,kNT_unitNone,0,nullptr},
+ {"Pinch",0,100,50,kNT_unitHasStrings,0,nullptr},
+ {"Pinch Height",-100,100,0,kNT_unitHasStrings,0,nullptr},
+ {"Depth",0,100,100,kNT_unitPercent,0,nullptr},
+ {"Pulse Width",5,95,50,kNT_unitPercent,0,nullptr},
+ {"Steps",2,16,8,kNT_unitNone,0,nullptr},
+ {"Contour",0,3,0,kNT_unitEnum,0,kStepContours},
+ {"Add/Remove",1,16,4,kNT_unitNone,0,nullptr},
+ {"Reset segment",0,1,0,kNT_unitConfirm,0,nullptr}
+};
+struct Segment {
+ uint8_t shape,repeats,timing,relative,fixed,pinch,depth,width,steps,contour;
+ int8_t curve,height;
+};
+static Segment defaultSegment(){return {kRampDown,1,0,2,2,50,100,50,8,0,0,0};}
 struct ShapeLFO : public _NT_algorithm {
-    _NT_parameterPage pages[5];
-    _NT_parameterPages pageSet;
-    uint8_t editParams[14];
-    uint8_t sequenceParams[1];
-    int16_t countRequest;      // -1 when no absolute-count edit is pending
-    bool syncCount;            // non-destructive Segments edit should sync builder
-    bool updatingCount;        // guard host-originated length synchronization
-    bool resetPending;         // confirmed segment reset, applied during draw()
-    // Integer sample-clock ticks; one tick increment is 8 * BPM.
-    // A segment's duration threshold is sampleRate * 15 * units.
-    // Here 1 unit means 1/128 bar (1/32 beat).
-    uint32_t segmentTicks;
-    uint32_t lastThreshold;
-    uint8_t currentSegment;
-    float previewPhase;
-    uint32_t testSamples;
-    float slewPrevious;
-    bool slewStarted;
-    ShapeLFO():countRequest(-1),syncCount(false),updatingCount(false),resetPending(false),
-        segmentTicks(0),lastThreshold(0),currentSegment(0),
-        previewPhase(0.0f),testSamples(0),slewPrevious(0),slewStarted(false) {
-        parameters=kParameters;
-        v=nullptr;
-        vIncludingCommon=nullptr;
-        editParams[0]=kSelected;
-        editParams[1]=kSlotBase;
-        editParams[2]=kSlotBase+1;
-        editParams[3]=kTimeSlotBase+1; // relative duration (default)
-        editParams[4]=kSculptBase;     // context: Curve on ramps, Width on square
-        editParams[5]=kTiltSlotBase;   // Pinch
-        editParams[6]=kAnchorSlotBase; // Pull
-        editParams[7]=kTiltSlotBase+1; // Depth
-        editParams[8]=kTimeSlotBase;   // timing mode
-        editParams[9]=kResetSegment;   // confirmed reset
-        editParams[10]=kEditCount;     // stable absolute count
-        sequenceParams[0]=kLength;    // non-destructive mask
-        pages[0]={"Main",5,0,{0,0},kMainParams};
-        pages[1]={"Edit",11,0,{0,0},editParams};
-        pages[2]={"Output",4,0,{0,0},kOutputParams};
-        pages[3]={"Sequence",1,0,{0,0},sequenceParams};
-        pages[4]={"Shape FX",2,0,{0,0},kShapeFxParams};
-        pageSet={5,pages};
-        parameterPages=&pageSet;
-    }
+ Segment segments[kMaxSegments];
+ _NT_parameterPage pages[5];
+ _NT_parameterPages pageSet;
+ uint8_t editParams[15];
+ uint8_t sequenceParams[1];
+ int16_t countRequest;
+ bool syncCount,updatingCount,resetPending,syncingEditor,pendingEditorSync;
+ uint32_t segmentTicks,lastThreshold;
+ uint8_t currentSegment;
+ float previewPhase;
+ uint32_t testSamples;
+ float slewPrevious;
+ bool slewStarted;
+ ShapeLFO():countRequest(-1),syncCount(false),updatingCount(false),resetPending(false),
+  syncingEditor(false),pendingEditorSync(false),segmentTicks(0),lastThreshold(0),currentSegment(0),
+  previewPhase(0),testSamples(0),slewPrevious(0),slewStarted(false){
+  for(int i=0;i<kMaxSegments;++i)segments[i]=defaultSegment();
+  segments[1].repeats=4;
+  segments[2].shape=kSine;
+  segments[3].shape=kRampUp;
+  parameters=kSharedDefaults;v=nullptr;vIncludingCommon=nullptr;
+  static const uint8_t mainParams[]={pBpm,pBaseDivision,pRange,pAmplitude,pOffset};
+  static const uint8_t outputParams[]={pOutput,pOutputMode,pSlew,pTest};
+  static const uint8_t shapeFxParams[]={pWarp,pSquish};
+  sequenceParams[0]=pSegments;
+  // Populate the Edit page before the NT's very first UI draw. No
+  // callback can rely on v[] until the host has attached its values.
+  const uint8_t initialEdit[]={pSelected,pShape,pRepeats,pRelDuration,pCurve,
+      pPinch,pHeight,pDepth,pTiming,pReset,pEditCount};
+  for(int i=0;i<11;++i)editParams[i]=initialEdit[i];
+  pages[0]={"Main",5,0,{0,0},mainParams};
+  pages[1]={"Edit",11,0,{0,0},editParams};
+  pages[2]={"Output",4,0,{0,0},outputParams};
+  pages[3]={"Sequence",1,0,{0,0},sequenceParams};
+  pages[4]={"Shape FX",2,0,{0,0},shapeFxParams};
+  pageSet={5,pages};parameterPages=&pageSet;
+ }
 };
-
-static inline float clampf(float x,float lo,float hi) {
-    return x < lo ? lo : (x > hi ? hi : x);
+static inline float clampf(float x,float lo,float hi){return x<lo?lo:(x>hi?hi:x);}
+static int count(const ShapeLFO* s){
+ int n=s->v[pSegments];return n<1?1:(n>kMaxSegments?kMaxSegments:n);
 }
-static int count(const ShapeLFO* s) {
-    int n=s->v[kLength];
-    return n < 1 ? 1 : (n > kMaxSegments ? kMaxSegments : n);
+static int selected(const ShapeLFO* s){
+ int n=s->v[pSelected]-1;return n<0?0:(n>=kMaxSegments?kMaxSegments-1:n);
 }
-static int selected(const ShapeLFO* s) {
-    int n=s->v[kSelected]-1;
-    return n < 0 ? 0 : (n >= kMaxSegments ? kMaxSegments-1 : n);
+// Keep the tested DSP code unchanged via an ID-to-storage adapter.
+// These legacy symbolic IDs are NOT registered with the NT host.
+static int V(const ShapeLFO* s,int old){
+ const int16_t* v=s->v;
+ if(old==kLength)return v[pSegments];
+ if(old==kSelected)return v[pSelected];
+ if(old==kBpm)return v[pBpm];
+ if(old==kRange)return v[pRange];
+ if(old==kAmplitude)return v[pAmplitude];
+ if(old==kOffset)return v[pOffset];
+ if(old==kOutput)return v[pOutput];
+ if(old==kOutputMode)return v[pOutputMode];
+ if(old==kTestOscillator)return v[pTest];
+ if(old==kBaseDivision)return v[pBaseDivision];
+ if(old==kSlew)return v[pSlew];
+ if(old==kWarp)return v[pWarp];
+ if(old==kSquish)return v[pSquish];
+ if(old>=kSlotBase && old<kSlotBase+32){
+  const Segment& g=s->segments[(old-kSlotBase)/2];return (old-kSlotBase)%2?g.repeats:g.shape;
+ }
+ if(old>=kTimeSlotBase && old<kTimeSlotBase+48){
+  const Segment& g=s->segments[(old-kTimeSlotBase)/3];
+  switch((old-kTimeSlotBase)%3){case 0:return g.timing;case 1:return g.relative;default:return g.fixed;}
+ }
+ if(old>=kSculptBase && old<kSculptBase+48){
+  const Segment& g=s->segments[(old-kSculptBase)/3];return (old-kSculptBase)%3==0?g.curve:100;
+ }
+ if(old>=kTiltSlotBase && old<kTiltSlotBase+32){
+  const Segment& g=s->segments[(old-kTiltSlotBase)/2];return (old-kTiltSlotBase)%2?g.depth:g.pinch;
+ }
+ if(old>=kAnchorSlotBase && old<kAnchorSlotBase+16)return s->segments[old-kAnchorSlotBase].height;
+ if(old>=kPulseWidthSlotBase && old<kPulseWidthSlotBase+16)return s->segments[old-kPulseWidthSlotBase].width;
+ if(old>=kStepCountSlotBase && old<kStepCountSlotBase+16)return s->segments[old-kStepCountSlotBase].steps;
+ if(old>=kStepContourSlotBase && old<kStepContourSlotBase+16)return s->segments[old-kStepContourSlotBase].contour;
+ return 0;
 }
-static int shapeAt(const ShapeLFO* s,int i) {
-    return s->v[kSlotBase+i*2];
+static int shapeAt(const ShapeLFO* s,int i){return s->segments[i].shape;}
+static int repeatsAt(const ShapeLFO* s,int i){const int v=s->segments[i].repeats;return v<1?1:(v>8?8:v);}
+static int modeAt(const ShapeLFO* s,int i){return s->segments[i].timing?1:0;}
+static int durationUnits(const ShapeLFO* s,int i){
+ const Segment& g=s->segments[i];
+ if(g.timing)return kFixedUnits[g.fixed<=7?g.fixed:7];
+ int base=s->v[pBaseDivision];base=base<0?0:(base>5?5:base);
+ const int rel=g.relative<=5?g.relative:5;
+ return (kBaseUnits[base]*kRelativeFactors[rel])/4;
 }
-static int repeatsAt(const ShapeLFO* s,int i) {
-    int r=s->v[kSlotBase+i*2+1];
-    return r < 1 ? 1 : (r > 8 ? 8 : r);
+static int totalUnits(const ShapeLFO* s){int sum=0;for(int i=0;i<count(s);++i)sum+=durationUnits(s,i);return sum>0?sum:1;}
+static void setHostParam(ShapeLFO* s,int param,int value){
+ int index=NT_algorithmIndex(s);
+ if(index>=0 && s->v[param]!=value)
+   NT_setParameterFromUi(static_cast<uint32_t>(index),static_cast<uint32_t>(param)+NT_parameterOffset(),static_cast<int16_t>(value));
 }
-static int timingParam(int i) {return kTimeSlotBase+3*i;}
-static int modeAt(const ShapeLFO* s,int i) {
-    return s->v[timingParam(i)]!=0 ? 1 : 0;
+static void updateEditPage(ShapeLFO* s,bool informHost){
+ int next=0;
+ const Segment& g=s->segments[selected(s)];
+ s->editParams[next++]=pSelected;
+ s->editParams[next++]=pShape;
+ s->editParams[next++]=pRepeats;
+ s->editParams[next++]=g.timing?pFixedDuration:pRelDuration;
+ if(g.shape==kSquare)s->editParams[next++]=pWidth;
+ else if(g.shape==kSteps){
+  s->editParams[next++]=pSteps;s->editParams[next++]=pContour;s->editParams[next++]=pCurve;
+ }else if(g.shape==kRampDown || g.shape==kRampUp)s->editParams[next++]=pCurve;
+ s->editParams[next++]=pPinch;s->editParams[next++]=pHeight;s->editParams[next++]=pDepth;
+ s->editParams[next++]=pTiming;s->editParams[next++]=pReset;s->editParams[next++]=pEditCount;
+ s->pages[1].numParams=static_cast<uint8_t>(next);
+ if(informHost){int index=NT_algorithmIndex(s);if(index>=0)NT_updateParameterPages(static_cast<uint32_t>(index));}
 }
-static int durationUnits(const ShapeLFO* s,int i) {
-    if(modeAt(s,i)){
-        int index=s->v[timingParam(i)+2];
-        if(index<0)index=0;
-        if(index>7)index=7;
-        return kFixedUnits[index];
-    }
-    int base=s->v[kBaseDivision];
-    if(base<0)base=0;
-    if(base>5)base=5;
-    int rel=s->v[timingParam(i)+1];
-    if(rel<0)rel=0;
-    if(rel>5)rel=5;
-    return (kBaseUnits[base]*kRelativeFactors[rel])/4;
+static void pushEditorValues(ShapeLFO* s){
+ const Segment& g=s->segments[selected(s)];
+ s->syncingEditor=true;
+ setHostParam(s,pShape,g.shape);setHostParam(s,pRepeats,g.repeats);
+ setHostParam(s,pTiming,g.timing);setHostParam(s,pRelDuration,g.relative);
+ setHostParam(s,pFixedDuration,g.fixed);setHostParam(s,pCurve,g.curve);
+ setHostParam(s,pPinch,g.pinch);setHostParam(s,pHeight,g.height);
+ setHostParam(s,pDepth,g.depth);setHostParam(s,pWidth,g.width);
+ setHostParam(s,pSteps,g.steps);setHostParam(s,pContour,g.contour);
+ s->syncingEditor=false;
+ updateEditPage(s,true);
 }
-static int totalUnits(const ShapeLFO* s) {
-    int sum=0;
-    for(int i=0;i<count(s);++i)sum+=durationUnits(s,i);
-    return sum > 0 ? sum : 1;
+static void pullEditorValue(ShapeLFO* s,int param){
+ Segment& g=s->segments[selected(s)];const int n=s->v[param];
+ switch(param){
+  case pShape:g.shape=n;break;case pRepeats:g.repeats=n;break;
+  case pTiming:g.timing=n;break;case pRelDuration:g.relative=n;break;
+  case pFixedDuration:g.fixed=n;break;case pCurve:g.curve=n;break;
+  case pPinch:g.pinch=n;break;case pHeight:g.height=n;break;
+  case pDepth:g.depth=n;break;case pWidth:g.width=n;break;
+  case pSteps:g.steps=n;break;case pContour:g.contour=n;break;
+ }
 }
-// Keep the often-used controls at the front, and show only shape-relevant
-// detail: Curve for ramps/Steps, Pulse Width for square, nothing for sine/High/Low.
-static void updateEditPage(ShapeLFO* s,bool informHost) {
-    const int slot=selected(s);
-    int next=0;
-    s->editParams[next++]=static_cast<uint8_t>(kSelected);
-    s->editParams[next++]=static_cast<uint8_t>(kSlotBase+2*slot);
-    s->editParams[next++]=static_cast<uint8_t>(kSlotBase+2*slot+1);
-    s->editParams[next++]=static_cast<uint8_t>(timingParam(slot)+(modeAt(s,slot)?2:1));
-    const int shape=shapeAt(s,slot);
-    if(shape==kSquare)
-        s->editParams[next++]=static_cast<uint8_t>(kPulseWidthSlotBase+slot);
-    else if(shape==kRampDown || shape==kRampUp)
-        s->editParams[next++]=static_cast<uint8_t>(kSculptBase+3*slot);
-    else if(shape==kSteps) {
-        s->editParams[next++]=static_cast<uint8_t>(kStepCountSlotBase+slot);
-        s->editParams[next++]=static_cast<uint8_t>(kStepContourSlotBase+slot);
-        s->editParams[next++]=static_cast<uint8_t>(kSculptBase+3*slot);
-    }
-    s->editParams[next++]=static_cast<uint8_t>(kTiltSlotBase+2*slot);
-    s->editParams[next++]=static_cast<uint8_t>(kAnchorSlotBase+slot);
-    s->editParams[next++]=static_cast<uint8_t>(kTiltSlotBase+2*slot+1);
-    s->editParams[next++]=static_cast<uint8_t>(timingParam(slot));
-    s->editParams[next++]=static_cast<uint8_t>(kResetSegment);
-    s->editParams[next++]=static_cast<uint8_t>(kEditCount);
-    s->pages[1].numParams=static_cast<uint8_t>(next);
-    if(informHost) {
-        int index=NT_algorithmIndex(s);
-        if(index>=0)NT_updateParameterPages(static_cast<uint32_t>(index));
-    }
+static void calculateRequirements(_NT_algorithmRequirements& req,const int32_t*){
+ req.numParameters=pCount;req.sram=sizeof(ShapeLFO);req.dram=0;req.dtc=0;req.itc=0;
 }
-static void calculateRequirements(_NT_algorithmRequirements& req,const int32_t*) {
-    req.numParameters=kNumParameters;
-    req.sram=sizeof(ShapeLFO);
-    req.dram=0;req.dtc=0;req.itc=0;
+static _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,const _NT_algorithmRequirements&,const int32_t*){
+ return new(ptrs.sram) ShapeLFO();
 }
-static _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
-                                const _NT_algorithmRequirements&,const int32_t*) {
-    return new (ptrs.sram) ShapeLFO();
+static void parameterChanged(_NT_algorithm* alg,int param){
+ ShapeLFO* s=static_cast<ShapeLFO*>(alg);
+ if(param==pEditCount){if(!s->updatingCount)s->countRequest=s->v[pEditCount];return;}
+ if(param==pReset){if(s->v[pReset])s->resetPending=true;return;}
+ if(param==pSegments && !s->updatingCount){s->syncCount=true;
+  if(s->currentSegment>=count(s)){s->currentSegment=0;s->segmentTicks=0;s->lastThreshold=0;}return;}
+ if(param==pSelected){s->pendingEditorSync=true;return;}
+ if(param>=pShape && param<=pContour){
+  if(s->syncingEditor)return;
+  pullEditorValue(s,param);
+  if(param==pShape || param==pTiming)updateEditPage(s,true);
+ }
+ if(param==pTest && s->v[pTest])s->testSamples=0;
+ if(param==pSlew && s->v[pSlew]==0)s->slewStarted=false;
 }
-// Parameter values are owned by the NT host. Never write to algorithm->v;
-// use the SDK setter so changes are visible to the UI and saved in presets.
-static void setHostParam(ShapeLFO* s,int param,int value) {
-    int index=NT_algorithmIndex(s);
-    if(index>=0)NT_setParameterFromUi(static_cast<uint32_t>(index),
-        static_cast<uint32_t>(param)+NT_parameterOffset(),static_cast<int16_t>(value));
+static void consumeEditRequest(ShapeLFO* s){
+ if(s->countRequest>=1){
+  int wanted=s->countRequest>kMaxSegments?kMaxSegments:s->countRequest;
+  s->countRequest=-1;s->syncCount=false;
+  int previous=count(s);
+  if(wanted>previous)for(int i=previous;i<wanted;++i)s->segments[i]=defaultSegment();
+  s->updatingCount=true;
+  if(wanted!=previous){setHostParam(s,pSegments,wanted);setHostParam(s,pSelected,wanted);s->pendingEditorSync=true;}
+  s->updatingCount=false;
+ }else if(s->syncCount || s->v[pEditCount]!=count(s)){
+  s->syncCount=false;s->updatingCount=true;setHostParam(s,pEditCount,count(s));s->updatingCount=false;
+ }
+ if(s->resetPending){
+  s->resetPending=false;
+  if(s->v[pReset]){setHostParam(s,pReset,0);s->segments[selected(s)]=defaultSegment();s->pendingEditorSync=true;}
+ }
+ if(s->pendingEditorSync){s->pendingEditorSync=false;pushEditorValues(s);}
 }
-static void parameterChanged(_NT_algorithm* alg,int param) {
-    ShapeLFO* s=static_cast<ShapeLFO*>(alg);
-    // The absolute builder count is never reset by us after an edit. Unlike
-    // the old momentary -1/0/+1 parameter this is safe for an analog pot.
-    if(param==kEditCount) {
-        if(!s->updatingCount) s->countRequest=s->v[kEditCount];
-        return;
-    }
-    if(param==kResetSegment) {
-        if(s->v[kResetSegment]==1) s->resetPending=true;
-        return;
-    }
-    if(param==kLength && !s->updatingCount) s->syncCount=true;
-    if(param==kSelected || param==kSlotBase+2*selected(s) ||
-       (param>=kTimeSlotBase && param<kSculptBase &&
-       ((param-kTimeSlotBase)%3)==0 &&
-       ((param-kTimeSlotBase)/3)==selected(s))) updateEditPage(s,true);
-    if(param==kLength && s->currentSegment>=count(s)) {
-        s->currentSegment=0;
-        s->segmentTicks=0;
-        s->lastThreshold=0;
-    }
-    if(param==kTestOscillator && s->v[kTestOscillator])s->testSamples=0;
-    if(param==kSlew && s->v[kSlew]==0)s->slewStarted=false;
-}
-
-static void resetSlot(ShapeLFO* s,int slot) {
-    setHostParam(s,kSlotBase+2*slot,kRampDown);
-    setHostParam(s,kSlotBase+2*slot+1,1);
-    setHostParam(s,timingParam(slot),0);
-    setHostParam(s,timingParam(slot)+1,2);
-    setHostParam(s,timingParam(slot)+2,2);
-    setHostParam(s,kSculptBase+3*slot,0);
-    setHostParam(s,kSculptBase+3*slot+1,100);
-    setHostParam(s,kSculptBase+3*slot+2,100);
-    setHostParam(s,kTiltSlotBase+2*slot,50);
-    setHostParam(s,kTiltSlotBase+2*slot+1,100);
-    setHostParam(s,kAnchorSlotBase+slot,0);
-    setHostParam(s,kPulseWidthSlotBase+slot,50);
-    setHostParam(s,kStepCountSlotBase+slot,8);
-    setHostParam(s,kStepContourSlotBase+slot,0);
-}
-
-// UI commands are applied during draw(), never inside parameterChanged().
-static void consumeEditRequest(ShapeLFO* s) {
-    if(s->countRequest>=1) {
-        const int wanted=s->countRequest>kMaxSegments?kMaxSegments:s->countRequest;
-        s->countRequest=-1;
-        s->syncCount=false; // explicit builder action wins over a stale sync
-        const int previous=count(s);
-        s->updatingCount=true;
-        if(wanted>previous) {
-            for(int slot=previous;slot<wanted;++slot)resetSlot(s,slot);
-        }
-        if(wanted!=previous) {
-            setHostParam(s,kLength,wanted);
-            // Select the newly appended segment, or the final remaining one.
-            setHostParam(s,kSelected,wanted);
-        }
-        s->updatingCount=false;
-    } else if(s->syncCount || s->v[kEditCount]!=count(s)) {
-        // 'Segments' is a non-destructive mask. Reflect its count in the
-        // builder's absolute value without reinitializing hidden slots.
-        s->syncCount=false;
-        s->updatingCount=true;
-        setHostParam(s,kEditCount,count(s));
-        s->updatingCount=false;
-    }
-    if(s->resetPending) {
-        s->resetPending=false;
-        if(s->v[kResetSegment]==1) {
-            // kNT_unitConfirm requires explicit host confirmation before 1
-            // is committed. Clear it after a single, deferred reset.
-            setHostParam(s,kResetSegment,0);
-            resetSlot(s,selected(s));
-        }
-    }
-}
-
 // Small single-cycle sine LUT. No libm required on the embedded target.
 // Evaluating in the audio callback costs one lookup + linear interpolation.
 #include "sine_lut.inc"
@@ -461,18 +370,19 @@ static inline float curvedStep(float t,int count,int contour,int curve) {
         const float alpha=smooth01((u-(1.0f-width))/width);
         return level+(next-level)*alpha;
     }
-    float direction=(next>=level)?1.0f:-1.0f;
+    // The arch/scoop polarity is defined by Curve alone, NOT by whether
+    // the staircase is rising or falling. Otherwise Hump and Valley invert
+    // their curvature halfway through the contour.
     float delta=next-level;
     if(delta<0.0f)delta=-delta;
     if(delta<0.0001f && i>0) {
-        float prev=stepValue(i-1,count,contour);
-        direction=(level>=prev)?1.0f:-1.0f;
+        const float prev=stepValue(i-1,count,contour);
         delta=level-prev;
         if(delta<0.0f)delta=-delta;
     }
     // The arch/scoop is bound by the output range. It may temporarily
     // diverge from adjacent step voltages, but never from [-1,+1].
-    const float signedDirection=curve<0?-direction:direction;
+    const float signedDirection=curve<0?-1.0f:1.0f;
     const float headroom=signedDirection>0.0f?1.0f-level:level+1.0f;
     const float reach=clampf(delta,0.0f,headroom);
     const float arch=level+signedDirection*reach*halfSine(u);
@@ -481,7 +391,11 @@ static inline float curvedStep(float t,int count,int contour,int curve) {
     // by the next stair jump, exactly as in the user's drawn examples.
     const float round=level+(next-level)*smooth01(u);
     const float mix=(curve-50)*0.02f;
-    return clampf(round+(arch-round)*mix,-1.0f,1.0f);
+    // A positive Curve must never turn into a scoop on a descending
+    // staircase. Keep the rounded transition when it rises, but clamp
+    // downward excursions to the current step plateau.
+    const float curved=round+(arch-round)*mix;
+    return clampf(curved<level?level:curved,-1.0f,1.0f);
 }
 static inline float waveform(int shape,float t,int curve=0,int width=50,
                              int stepCount=8,int contour=0) {
@@ -515,8 +429,8 @@ static inline float amplitudeAt(const ShapeLFO* s,int slot,float inside) {
     const int base=kTiltSlotBase+2*slot;
     // UI increases clockwise toward pinching the RIGHT side; invert the
     // original tilt coordinate, which increased toward the LEFT.
-    const float tilt=1.0f-clampf(static_cast<float>(s->v[base])*0.01f,0.0f,1.0f);
-    const float depth=clampf(static_cast<float>(s->v[base+1])*0.01f,0.0f,1.0f);
+    const float tilt=1.0f-clampf(static_cast<float>(V(s,base))*0.01f,0.0f,1.0f);
+    const float depth=clampf(static_cast<float>(V(s,base+1))*0.01f,0.0f,1.0f);
     const float start=(tilt<=0.5f)?1.0f:(2.0f-2.0f*tilt);
     const float end=(tilt>=0.5f)?1.0f:(2.0f*tilt);
     return depth*(start+(end-start)*inside);
@@ -526,31 +440,31 @@ static inline float amplitudeAt(const ShapeLFO* s,int slot,float inside) {
 // Old non-neutral Pull parameter values have their direction reversed.
 static inline float anchorAt(const ShapeLFO* s,int slot) {
     // Positive height is UP on the NT: invert the original anchor coordinate.
-    return -clampf(static_cast<float>(s->v[kAnchorSlotBase+slot])*0.01f,-1.0f,1.0f);
+    return -clampf(static_cast<float>(V(s,kAnchorSlotBase+slot))*0.01f,-1.0f,1.0f);
 }
 static inline float shapedAt(const ShapeLFO* s,int slot,float inside) {
     const int r=repeatsAt(s,slot);
     float p=inside*static_cast<float>(r);
     p-=static_cast<float>(static_cast<int>(p));
-    p=shapedPhase(p,50+s->v[kWarp],s->v[kSquish]);
+    p=shapedPhase(p,50+V(s,kWarp),V(s,kSquish));
     const int base=kSculptBase+3*slot;
-    return waveform(shapeAt(s,slot),p,s->v[base],
-                    s->v[kPulseWidthSlotBase+slot],
-                    s->v[kStepCountSlotBase+slot],
-                    s->v[kStepContourSlotBase+slot])*amplitudeAt(s,slot,inside);
+    return waveform(shapeAt(s,slot),p,V(s,base),
+                    V(s,kPulseWidthSlotBase+slot),
+                    V(s,kStepCountSlotBase+slot),
+                    V(s,kStepContourSlotBase+slot))*amplitudeAt(s,slot,inside);
 }
 static float scaleOutput(const ShapeLFO* s,float wave,float envelope,int slot) {
     float center=0.0f,radius=5.0f;
-    if(s->v[kRange]==1){center=2.5f;radius=2.5f;}
-    else if(s->v[kRange]==2){center=5.0f;radius=5.0f;}
-    const float amp=s->v[kAmplitude]*0.01f;
+    if(V(s,kRange)==1){center=2.5f;radius=2.5f;}
+    else if(V(s,kRange)==2){center=5.0f;radius=5.0f;}
+    const float amp=V(s,kAmplitude)*0.01f;
     // `wave` already includes the segment envelope. When envelope=1 and
     // amp=100%, all anchor positions produce the same full-range waveform.
     // As amplitude decreases, the waveform converges toward `base`:
     // bottom=0V, center=5V, top=10V in a 0..10V range.
     const float base=center-radius*anchorAt(s,slot);
     float volts=base+amp*(radius*wave+(center-base)*envelope);
-    volts+=s->v[kOffset]*0.001f;
+    volts+=V(s,kOffset)*0.001f;
     return clampf(volts,-10.0f,10.0f);
 }
 // The preview uses exactly the same output-voltage transform as the DSP.
@@ -582,13 +496,13 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     ShapeLFO* s=static_cast<ShapeLFO*>(alg);
     const int frames=numFramesBy4*4;
     if(frames<=0)return;
-    const int bus=s->v[kOutput];
+    const int bus=V(s,kOutput);
     float* out=bus>0 ? buses+(bus-1)*frames : nullptr;
-    const bool replace=s->v[kOutputMode]!=0;
+    const bool replace=V(s,kOutputMode)!=0;
     const uint32_t sampleRate =
         (NT_globals.sampleRate >= 8000 && NT_globals.sampleRate <= 192000)
         ? NT_globals.sampleRate : 48000;
-    int bpm=s->v[kBpm];
+    int bpm=V(s,kBpm);
     if(bpm<20)bpm=20;
     if(bpm>300)bpm=300;
     uint32_t ticks=s->segmentTicks;
@@ -605,7 +519,7 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     float invThreshold=1.0f/static_cast<float>(threshold);
     uint32_t testSamples=s->testSamples;
     const uint32_t halfTestCycle=sampleRate/4;
-    const int slewChoice=s->v[kSlew];
+    const int slewChoice=V(s,kSlew);
     float maxSlew=0.0f;
     if(slewChoice>0 && slewChoice<kSlewCount) {
         maxSlew=10000.0f/(static_cast<float>(sampleRate)*
@@ -618,7 +532,7 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     for(int i=0;i<frames;++i) {
         float wave;
         float envelope=1.0f;
-        if(s->v[kTestOscillator]) {
+        if(V(s,kTestOscillator)) {
             wave=testSamples<halfTestCycle?1.0f:-1.0f;
             ++testSamples;
             if(testSamples>=halfTestCycle*2)testSamples=0;
@@ -702,15 +616,15 @@ static bool draw(_NT_algorithm* alg) {
     *r++='S';appendInt(r,choice+1);
     *r++=' ';*r++='x';appendInt(r,repeatsAt(s,choice));
     *r++=' ';appendText(r,modeAt(s,choice)?"FIX":"REL");*r=0;
-    NT_drawText(251,58,s->v[kTestOscillator]?"TEST 2HZ":right,14,kNT_textRight,kNT_textTiny);
+    NT_drawText(251,58,V(s,kTestOscillator)?"TEST 2HZ":right,14,kNT_textRight,kNT_textTiny);
     const int x0=4,x1=251,y0=15,y1=49;
     // Show the ACTUAL output range, not a signed LFO normalized to +/-1.
     // In a unipolar mode the horizontal baseline means zero volts, at the
     // BOTTOM of the plot; in bipolar mode it marks 0V at the CENTER.
     float viewMin=-5.0f,viewMax=5.0f;
-    if(s->v[kRange]==1){viewMin=0.0f;viewMax=5.0f;}
-    else if(s->v[kRange]==2){viewMin=0.0f;viewMax=10.0f;}
-    const int zeroY=(s->v[kRange]==0)?(y0+y1)/2:y1;
+    if(V(s,kRange)==1){viewMin=0.0f;viewMax=5.0f;}
+    else if(V(s,kRange)==2){viewMin=0.0f;viewMax=10.0f;}
+    const int zeroY=(V(s,kRange)==0)?(y0+y1)/2:y1;
     NT_drawShapeI(kNT_line,x0,zeroY,x1,zeroY,3);
     const float pixelsPerVolt=static_cast<float>(y1-y0)/(viewMax-viewMin);
     auto toY=[&](float volts) -> int {
@@ -755,53 +669,30 @@ static bool draw(_NT_algorithm* alg) {
     return false;
 }
 
-// Custom value text makes these continuous controls understandable on the NT.
-// Values are stored at their original IDs, but Pinch/Pinch Height control
-// directions are reversed in v0.4.0; see README for old preset migration.
-static int parameterString(_NT_algorithm*,int param,int value,char* buffer) {
-    bool pinch=false;
-    bool pull=false;
-    if(param>=kTiltSlotBase && param<kTiltSlotBase+2*kMaxSegments)
-        pinch=((param-kTiltSlotBase)%2)==0;
-    if(param>=kAnchorSlotBase && param<kAnchorSlotBase+kMaxSegments)
-        pull=true;
-    char* p=buffer;
-    if(pinch) {
-        if(value==50)appendText(p,"None");
-        else {
-            const int percent=value<50?(50-value)*2:(value-50)*2;
-            appendText(p,value<50?"Left ":"Right ");
-            appendInt(p,percent);
-            *p++='%';
-        }
-    } else if(pull) {
-        if(value==0)appendText(p,"Center");
-        else {
-            appendText(p,value<0?"Down ":"Up ");
-            appendInt(p,value<0?-value:value);
-            *p++='%';
-        }
-    } else if(param==kResetSegment) {
-        appendText(p,value==0?"Ready":"Reset selected");
-    } else return 0;
-    *p=0;
-    return static_cast<int>(p-buffer);
-}
 
+static int parameterString(_NT_algorithm*,int param,int value,char* buffer){
+ char* p=buffer;
+ if(param==pPinch){
+  if(value==50)appendText(p,"None");
+  else {const int x=value<50?(50-value)*2:(value-50)*2;
+   appendText(p,value<50?"Left ":"Right ");appendInt(p,x);*p++='%';}
+ }else if(param==pHeight){
+  if(value==0)appendText(p,"Center");
+  else {appendText(p,value<0?"Down ":"Up ");appendInt(p,value<0?-value:value);*p++='%';}
+ }else if(param==pReset)appendText(p,value==0?"Ready":"Reset selected");
+ else return 0;
+ *p=0;return static_cast<int>(p-buffer);
+}
 static const _NT_factory kFactory={
-    NT_MULTICHAR('S','L','F','1'),
-    "Shape LFO", "Clocked multi-segment shape LFO (v0.4.2)",
-    0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
-    draw,nullptr,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
-    nullptr,nullptr,nullptr,nullptr,parameterString,nullptr
+ NT_MULTICHAR('S','L','F','2'),"Shape LFO","Shared-editor shape LFO (v0.5.0 experimental)",
+ 0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
+ draw,nullptr,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
+ nullptr,nullptr,nullptr,nullptr,parameterString,nullptr
 };
 } // namespace
-
-extern "C" uintptr_t pluginEntry(_NT_selector selector,uint32_t index) {
-    switch(selector){
-        case kNT_selector_version:return kNT_apiVersion13;
-        case kNT_selector_numFactories:return 1;
-        case kNT_selector_factoryInfo:return index==0?reinterpret_cast<uintptr_t>(&kFactory):0;
-        default:return 0;
-    }
+extern "C" uintptr_t pluginEntry(_NT_selector selector,uint32_t index){
+ switch(selector){case kNT_selector_version:return kNT_apiVersion13;
+ case kNT_selector_numFactories:return 1;
+ case kNT_selector_factoryInfo:return index==0?reinterpret_cast<uintptr_t>(&kFactory):0;
+ default:return 0;}
 }
