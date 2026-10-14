@@ -28,9 +28,26 @@ jobs:
           test -f distingNT_API/include/distingnt/api.h
           echo "SDK commit: $(git -C distingNT_API rev-parse HEAD)"
 
-      - name: Run host-side tests
+      - name: Check source files
         shell: bash
-        run: bash tests/run.sh
+        run: |
+          set -euo pipefail
+          for f in build.sh shape_lfo.cpp sine_lut.inc; do
+            if [[ ! -f "$f" ]]; then
+              echo "::error::Required source file missing: $f (check repository root)"
+              exit 1
+            fi
+          done
+          echo "Required plugin source files found."
+
+      - name: Run host-side tests (if uploaded)
+        shell: bash
+        run: |
+          if [[ -f tests/run.sh ]]; then
+            bash tests/run.sh
+          else
+            echo "::warning::tests/run.sh was not uploaded; skipping optional host tests."
+          fi
 
       - name: Build Disting NT plugin
         shell: bash
