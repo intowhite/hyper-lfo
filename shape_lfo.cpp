@@ -1,4 +1,4 @@
-// Shape LFO v0.3.5 for Expert Sleepers disting NT
+// Shape LFO v0.3.6 for Expert Sleepers disting NT
 // Copyright (c) 2026. MIT license.
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -32,7 +32,9 @@ enum Param {
     // Keep legacy global mixes at their original IDs for old NT presets.
     kAnchorSlotBase=kZeroMix+1,           // 16 independent fade anchors
     kPulseWidthSlotBase=kAnchorSlotBase+kMaxSegments, // 16 square duty values
-    kNumParameters=kPulseWidthSlotBase+kMaxSegments
+    kEditCount=kPulseWidthSlotBase+kMaxSegments, // persistent absolute builder count
+    kResetSegment=kEditCount+1,             // confirm before resetting selection
+    kNumParameters=kResetSegment+1
 };
 enum Shape { kRampDown=0, kRampUp=1, kSine=2, kSquare=3, kHigh=4, kLow=5 };
 // Append new shapes only; existing saved shape selections keep their IDs.
@@ -72,9 +74,9 @@ static constexpr int kSlewCount=sizeof(kSlewMilliseconds)/sizeof(kSlewMillisecon
 // Old amp start/end remain hidden in the parameter array for stable indices;
 // v0.3.2 uses the following Tilt/Depth values to generate the envelope.
 #define TILTDEPTH(i) \
-    {"S" #i " amp tilt",0,100,50,kNT_unitPercent,0,nullptr}, \
+    {"S" #i " pinch",0,100,50,kNT_unitHasStrings,0,nullptr}, \
     {"S" #i " depth",0,100,100,kNT_unitPercent,0,nullptr}
-#define ANCHOR(i) {"S" #i " tilt pivot",-100,100,0,kNT_unitPercent,0,nullptr}
+#define ANCHOR(i) {"S" #i " pull",-100,100,0,kNT_unitHasStrings,0,nullptr}
 #define WIDTH(i) {"S" #i " pulse width",5,95,50,kNT_unitPercent,0,nullptr}
 static const _NT_parameter kParameters[] = {
     {"Segments",1,16,4,kNT_unitNone,0,nullptr},
@@ -122,7 +124,9 @@ static const _NT_parameter kParameters[] = {
     WIDTH(1), WIDTH(2), WIDTH(3), WIDTH(4),
     WIDTH(5), WIDTH(6), WIDTH(7), WIDTH(8),
     WIDTH(9), WIDTH(10), WIDTH(11), WIDTH(12),
-    WIDTH(13), WIDTH(14), WIDTH(15), WIDTH(16)
+    WIDTH(13), WIDTH(14), WIDTH(15), WIDTH(16),
+    {"Add/Remove",1,16,4,kNT_unitNone,0,nullptr},
+    {"Reset segment",0,1,0,kNT_unitConfirm,0,nullptr}
 };
 #undef SEG
 #undef TIME
@@ -137,10 +141,14 @@ static const uint8_t kMainParams[] = {kBpm,kBaseDivision,kRange,kAmplitude,kOffs
 static const uint8_t kOutputParams[] = {kOutput,kOutputMode,kSlew,kTestOscillator};
 
 struct ShapeLFO : public _NT_algorithm {
-    _NT_parameterPage pages[3];
+    _NT_parameterPage pages[4];
     _NT_parameterPages pageSet;
     uint8_t editParams[11];
-    int8_t editPending;
+    uint8_t sequenceParams[1];
+    int16_t countRequest;      // -1 when no absolute-count edit is pending
+    bool syncCount;            // non-destructive Segments edit should sync builder
+    bool updatingCount;        // guard host-originated length synchronization
+    bool resetPending;         // confirmed segment reset, applied during draw()
     // Integer sample-clock ticks; one tick increment is 8 * BPM.
     // A segment's duration threshold is sampleRate * 15 * units.
     // Here 1 unit means 1/128 bar (1/32 beat).
@@ -151,7 +159,8 @@ struct ShapeLFO : public _NT_algorithm {
     uint32_t testSamples;
     float slewPrevious;
     bool slewStarted;
-    ShapeLFO():editPending(0),segmentTicks(0),lastThreshold(0),currentSegment(0),
+    ShapeLFO():countRequest(-1),syncCount(false),updatingCount(false),resetPending(false),
+        segmentTicks(0),lastThreshold(0),currentSegment(0),
         previewPhase(0.0f),testSamples(0),slewPrevious(0),slewStarted(false) {
         parameters=kParameters;
         v=nullptr;
@@ -161,16 +170,18 @@ struct ShapeLFO : public _NT_algorithm {
         editParams[2]=kSlotBase+1;
         editParams[3]=kTimeSlotBase+1; // relative duration (default)
         editParams[4]=kSculptBase;     // context: Curve on ramps, Width on square
-        editParams[5]=kTiltSlotBase;   // envelope tilt
-        editParams[6]=kTiltSlotBase+1; // envelope depth
-        editParams[7]=kAnchorSlotBase; // -100 top, 0 center, +100 bottom
-        editParams[8]=kTimeSlotBase;   // timing mode (rarely changed)
-        editParams[9]=kLength;         // manual count adjustment
-        editParams[10]=kAddSegment;    // append a fresh shape
+        editParams[5]=kTiltSlotBase;   // Pinch
+        editParams[6]=kAnchorSlotBase; // Pull
+        editParams[7]=kTiltSlotBase+1; // Depth
+        editParams[8]=kTimeSlotBase;   // timing mode
+        editParams[9]=kResetSegment;   // confirmed reset
+        editParams[10]=kEditCount;     // stable absolute count
+        sequenceParams[0]=kLength;    // non-destructive mask
         pages[0]={"Main",5,0,{0,0},kMainParams};
         pages[1]={"Edit",11,0,{0,0},editParams};
         pages[2]={"Output",4,0,{0,0},kOutputParams};
-        pageSet={3,pages};
+        pages[3]={"Sequence",1,0,{0,0},sequenceParams};
+        pageSet={4,pages};
         parameterPages=&pageSet;
     }
 };
@@ -232,11 +243,11 @@ static void updateEditPage(ShapeLFO* s,bool informHost) {
     else if(shape==kRampDown || shape==kRampUp)
         s->editParams[next++]=static_cast<uint8_t>(kSculptBase+3*slot);
     s->editParams[next++]=static_cast<uint8_t>(kTiltSlotBase+2*slot);
-    s->editParams[next++]=static_cast<uint8_t>(kTiltSlotBase+2*slot+1);
     s->editParams[next++]=static_cast<uint8_t>(kAnchorSlotBase+slot);
+    s->editParams[next++]=static_cast<uint8_t>(kTiltSlotBase+2*slot+1);
     s->editParams[next++]=static_cast<uint8_t>(timingParam(slot));
-    s->editParams[next++]=static_cast<uint8_t>(kLength);
-    s->editParams[next++]=static_cast<uint8_t>(kAddSegment);
+    s->editParams[next++]=static_cast<uint8_t>(kResetSegment);
+    s->editParams[next++]=static_cast<uint8_t>(kEditCount);
     s->pages[1].numParams=static_cast<uint8_t>(next);
     if(informHost) {
         int index=NT_algorithmIndex(s);
@@ -261,13 +272,17 @@ static void setHostParam(ShapeLFO* s,int param,int value) {
 }
 static void parameterChanged(_NT_algorithm* alg,int param) {
     ShapeLFO* s=static_cast<ShapeLFO*>(alg);
-    // Never issue host writes in parameterChanged(). Defer user commands
-    // to draw() after the host has completed the knob-change callback.
-    if(param==kAddSegment) {
-        const int action=s->v[kAddSegment];
-        s->editPending=static_cast<int8_t>(action<-1?-1:(action>1?1:action));
+    // The absolute builder count is never reset by us after an edit. Unlike
+    // the old momentary -1/0/+1 parameter this is safe for an analog pot.
+    if(param==kEditCount) {
+        if(!s->updatingCount) s->countRequest=s->v[kEditCount];
         return;
     }
+    if(param==kResetSegment) {
+        if(s->v[kResetSegment]==1) s->resetPending=true;
+        return;
+    }
+    if(param==kLength && !s->updatingCount) s->syncCount=true;
     if(param==kSelected || param==kSlotBase+2*selected(s) ||
        (param>=kTimeSlotBase && param<kSculptBase &&
        ((param-kTimeSlotBase)%3)==0 &&
@@ -281,28 +296,7 @@ static void parameterChanged(_NT_algorithm* alg,int param) {
     if(param==kSlew && s->v[kSlew]==0)s->slewStarted=false;
 }
 
-// Apply a queued UI command outside parameterChanged(), avoiding nested
-// host parameter writes while the NT is processing a knob change.
-// This runs from draw() on the UI side, not from the audio callback.
-static void consumeEditRequest(ShapeLFO* s) {
-    const int action=s->editPending;
-    if(action==0)return;
-    s->editPending=0;
-    if(s->v[kAddSegment]!=action)return; // Ignore cancelled/stale commands.
-    // First restore neutral (legacy preset default), then apply changes.
-    setHostParam(s,kAddSegment,0);
-    const int oldCount=count(s);
-    if(action<0) {
-        // Safe/symmetric operation: remove the FINAL segment only. Do not
-        // delete or shift selected middle segments; that's a future editor.
-        if(oldCount<=1)return;
-        setHostParam(s,kLength,oldCount-1);
-        setHostParam(s,kSelected,oldCount-1);
-        return;
-    }
-    if(oldCount>=kMaxSegments)return;
-    const int slot=oldCount;
-    // Fresh defaults every time, even if this slot existed previously.
+static void resetSlot(ShapeLFO* s,int slot) {
     setHostParam(s,kSlotBase+2*slot,kRampDown);
     setHostParam(s,kSlotBase+2*slot+1,1);
     setHostParam(s,timingParam(slot),0);
@@ -315,8 +309,42 @@ static void consumeEditRequest(ShapeLFO* s) {
     setHostParam(s,kTiltSlotBase+2*slot+1,100);
     setHostParam(s,kAnchorSlotBase+slot,0);
     setHostParam(s,kPulseWidthSlotBase+slot,50);
-    setHostParam(s,kLength,oldCount+1);
-    setHostParam(s,kSelected,oldCount+1);
+}
+
+// UI commands are applied during draw(), never inside parameterChanged().
+static void consumeEditRequest(ShapeLFO* s) {
+    if(s->countRequest>=1) {
+        const int wanted=s->countRequest>kMaxSegments?kMaxSegments:s->countRequest;
+        s->countRequest=-1;
+        s->syncCount=false; // explicit builder action wins over a stale sync
+        const int previous=count(s);
+        s->updatingCount=true;
+        if(wanted>previous) {
+            for(int slot=previous;slot<wanted;++slot)resetSlot(s,slot);
+        }
+        if(wanted!=previous) {
+            setHostParam(s,kLength,wanted);
+            // Select the newly appended segment, or the final remaining one.
+            setHostParam(s,kSelected,wanted);
+        }
+        s->updatingCount=false;
+    } else if(s->syncCount || s->v[kEditCount]!=count(s)) {
+        // 'Segments' is a non-destructive mask. Reflect its count in the
+        // builder's absolute value without reinitializing hidden slots.
+        s->syncCount=false;
+        s->updatingCount=true;
+        setHostParam(s,kEditCount,count(s));
+        s->updatingCount=false;
+    }
+    if(s->resetPending) {
+        s->resetPending=false;
+        if(s->v[kResetSegment]==1) {
+            // kNT_unitConfirm requires explicit host confirmation before 1
+            // is committed. Clear it after a single, deferred reset.
+            setHostParam(s,kResetSegment,0);
+            resetSlot(s,selected(s));
+        }
+    }
 }
 
 // Small single-cycle sine LUT. No libm required on the embedded target.
@@ -526,8 +554,7 @@ static bool draw(_NT_algorithm* alg) {
     ShapeLFO* s=static_cast<ShapeLFO*>(alg);
     int n=count(s);
     int choice=selected(s);
-    // Process queued Add on a later UI callback, never while the host is
-    // handling the parameterChanged() event that requested it.
+    // Apply deferred builder/reset operations outside parameterChanged().
     consumeEditRequest(s);
     n=count(s);choice=selected(s);
     char left[64];
@@ -593,12 +620,44 @@ static bool draw(_NT_algorithm* alg) {
     return false;
 }
 
+// Custom value text makes these continuous controls understandable on the NT.
+// Stored parameter values retain their original semantics for preset safety.
+static int parameterString(_NT_algorithm*,int param,int value,char* buffer) {
+    bool pinch=false;
+    bool pull=false;
+    if(param>=kTiltSlotBase && param<kTiltSlotBase+2*kMaxSegments)
+        pinch=((param-kTiltSlotBase)%2)==0;
+    if(param>=kAnchorSlotBase && param<kAnchorSlotBase+kMaxSegments)
+        pull=true;
+    char* p=buffer;
+    if(pinch) {
+        if(value==50)appendText(p,"None");
+        else {
+            const int percent=value<50?(50-value)*2:(value-50)*2;
+            appendText(p,value<50?"Right ":"Left ");
+            appendInt(p,percent);
+            *p++='%';
+        }
+    } else if(pull) {
+        if(value==0)appendText(p,"Center");
+        else {
+            appendText(p,value<0?"Up ":"Down ");
+            appendInt(p,value<0?-value:value);
+            *p++='%';
+        }
+    } else if(param==kResetSegment) {
+        appendText(p,value==0?"Ready":"Reset selected");
+    } else return 0;
+    *p=0;
+    return static_cast<int>(p-buffer);
+}
+
 static const _NT_factory kFactory={
     NT_MULTICHAR('S','L','F','1'),
-    "Shape LFO", "Clocked multi-segment shape LFO (v0.3.5)",
+    "Shape LFO", "Clocked multi-segment shape LFO (v0.3.6)",
     0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
     draw,nullptr,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
-    nullptr,nullptr,nullptr,nullptr,nullptr,nullptr
+    nullptr,nullptr,nullptr,nullptr,parameterString,nullptr
 };
 } // namespace
 
