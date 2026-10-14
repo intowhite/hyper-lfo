@@ -1,4 +1,4 @@
-// Shape LFO v0.4.1 for Expert Sleepers disting NT
+// Shape LFO v0.4.2 for Expert Sleepers disting NT
 // Copyright (c) 2026. MIT license.
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -36,9 +36,11 @@ enum Param {
     kResetSegment=kEditCount+1,             // confirm before resetting selection
     kStepCountSlotBase=kResetSegment+1, // 16 per-segment staircase counts (append-only)
     kStepContourSlotBase=kStepCountSlotBase+kMaxSegments, // 16 staircase contour modes
-    kWarp=kStepContourSlotBase+kMaxSegments, // global phase-warp, appended
-    kSquish,                            // global intracycle phase bend
-    kNumParameters
+    // Reuse two dormant legacy parameter IDs. Keep total at 241, the
+    // exact parameter count of the hardware-validated v0.4.0 release.
+    kWarp=kAmpAnchor,                   // formerly legacy global amp anchor (0 / 1)
+    kSquish=kAddSegment,                // formerly unused momentary add (neutral 0)
+    kNumParameters=kStepContourSlotBase+kMaxSegments
 };
 enum Shape { kRampDown=0, kRampUp=1, kSine=2, kSquare=3, kHigh=4, kLow=5,
              kTriangle=6, kSteps=7 };
@@ -118,8 +120,8 @@ static const _NT_parameter kParameters[] = {
     // Signed momentary action: left=-1 removes LAST, right=+1 appends.
     // kNT_unitNone avoids relying on enum-string indexing for negative values.
     // Keep neutral=0 to preserve old saved states and parameter IDs.
-    {"Add/Remove",-1,1,0,kNT_unitNone,0,nullptr},
-    {"Amp anchor (legacy)",0,1,0,kNT_unitEnum,0,kAmpAnchors},
+    {"Squish",-100,100,0,kNT_unitPercent,0,nullptr},
+    {"Warp",-45,45,0,kNT_unitNone,0,nullptr},
     TILTDEPTH(1), TILTDEPTH(2), TILTDEPTH(3), TILTDEPTH(4),
     TILTDEPTH(5), TILTDEPTH(6), TILTDEPTH(7), TILTDEPTH(8),
     TILTDEPTH(9), TILTDEPTH(10), TILTDEPTH(11), TILTDEPTH(12),
@@ -143,9 +145,7 @@ static const _NT_parameter kParameters[] = {
     STEPCONTOUR(1), STEPCONTOUR(2), STEPCONTOUR(3), STEPCONTOUR(4),
     STEPCONTOUR(5), STEPCONTOUR(6), STEPCONTOUR(7), STEPCONTOUR(8),
     STEPCONTOUR(9), STEPCONTOUR(10), STEPCONTOUR(11), STEPCONTOUR(12),
-    STEPCONTOUR(13), STEPCONTOUR(14), STEPCONTOUR(15), STEPCONTOUR(16),
-    {"Warp",5,95,50,kNT_unitPercent,0,nullptr},
-    {"Squish",-100,100,0,kNT_unitPercent,0,nullptr}
+    STEPCONTOUR(13), STEPCONTOUR(14), STEPCONTOUR(15), STEPCONTOUR(16)
 };
 #undef SEG
 #undef TIME
@@ -155,6 +155,7 @@ static const _NT_parameter kParameters[] = {
 #undef WIDTH
 #undef STEPCOUNT
 #undef STEPCONTOUR
+static_assert(kNumParameters <= 241, "Do not exceed NT hardware-validated parameter budget before storage refactor");
 static_assert(sizeof(kParameters)/sizeof(kParameters[0]) == kNumParameters,
               "Parameters must match declared indices");
 
@@ -531,7 +532,7 @@ static inline float shapedAt(const ShapeLFO* s,int slot,float inside) {
     const int r=repeatsAt(s,slot);
     float p=inside*static_cast<float>(r);
     p-=static_cast<float>(static_cast<int>(p));
-    p=shapedPhase(p,s->v[kWarp],s->v[kSquish]);
+    p=shapedPhase(p,50+s->v[kWarp],s->v[kSquish]);
     const int base=kSculptBase+3*slot;
     return waveform(shapeAt(s,slot),p,s->v[base],
                     s->v[kPulseWidthSlotBase+slot],
@@ -789,7 +790,7 @@ static int parameterString(_NT_algorithm*,int param,int value,char* buffer) {
 
 static const _NT_factory kFactory={
     NT_MULTICHAR('S','L','F','1'),
-    "Shape LFO", "Clocked multi-segment shape LFO (v0.4.1)",
+    "Shape LFO", "Clocked multi-segment shape LFO (v0.4.2)",
     0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
     draw,nullptr,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
     nullptr,nullptr,nullptr,nullptr,parameterString,nullptr
