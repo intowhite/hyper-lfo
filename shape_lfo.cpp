@@ -1,4 +1,4 @@
-// Shape LFO v0.3.6 for Expert Sleepers disting NT
+// Shape LFO v0.4.0 for Expert Sleepers disting NT
 // Copyright (c) 2026. MIT license.
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -34,11 +34,16 @@ enum Param {
     kPulseWidthSlotBase=kAnchorSlotBase+kMaxSegments, // 16 square duty values
     kEditCount=kPulseWidthSlotBase+kMaxSegments, // persistent absolute builder count
     kResetSegment=kEditCount+1,             // confirm before resetting selection
-    kNumParameters=kResetSegment+1
+    kStepCountSlotBase=kResetSegment+1, // 16 per-segment staircase counts (append-only)
+    kStepContourSlotBase=kStepCountSlotBase+kMaxSegments, // 16 staircase contour modes
+    kNumParameters=kStepContourSlotBase+kMaxSegments
 };
-enum Shape { kRampDown=0, kRampUp=1, kSine=2, kSquare=3, kHigh=4, kLow=5 };
+enum Shape { kRampDown=0, kRampUp=1, kSine=2, kSquare=3, kHigh=4, kLow=5,
+             kTriangle=6, kSteps=7 };
 // Append new shapes only; existing saved shape selections keep their IDs.
-static char const* const kShapes[] = {"Ramp down", "Ramp up", "Sine", "Square", "High", "Low"};
+static char const* const kShapes[] = {"Ramp down", "Ramp up", "Sine", "Square", "High", "Low",
+                                       "Triangle", "Steps"};
+static char const* const kStepContours[] = {"Up", "Down", "Hump", "Valley", "Alternate"};
 static char const* const kRanges[] = {"-5 to +5V", "0 to 5V", "0 to 10V"};
 static char const* const kTestModes[] = {"Off", "2 Hz square"};
 static char const* const kBaseDivisions[] = {"1/32", "1/16", "1/8", "1/4", "1/2", "1 bar"};
@@ -52,16 +57,16 @@ static constexpr int kRelativeFactors[] = {1,2,4,8,16,32}; // /4: 1/4..8
 static constexpr int kFixedUnits[] = {4,8,16,32,64,128,256,512};
 static constexpr int kSlewMilliseconds[] = {0,1,2,5,10,20,40,80,160,320,640,1000};
 static char const* const kAmpAnchors[] = {"Centered", "From zero"};
-// Per-segment Anchor is signed, preserving old stored settings:
-// -100 = top of selected voltage range, 0 = midpoint, +100 = bottom.
-// Amplitude decays/swells toward the selected anchor, including in bipolar mode.
+// The signed Pinch Height control is +100=top, 0=center, -100=bottom.
+// v0.4 reverses the old Pull direction for clockwise=up. Saved non-neutral
+// Pull values need to be negated to recreate the old sound.
 // On 0..10V: Top=10V, Center=5V, Bottom=0V.
 static constexpr int kSlewCount=sizeof(kSlewMilliseconds)/sizeof(kSlewMilliseconds[0]);
 
 // Old parameters retain their exact indices. New per-slot values are separate
 // host-owned parameters, so storing a whole NT preset saves every segment.
 #define SEG(i, shape, repeats) \
-    {"S" #i " shape",0,5,shape,kNT_unitEnum,0,kShapes}, \
+    {"S" #i " shape",0,7,shape,kNT_unitEnum,0,kShapes}, \
     {"S" #i " repeats",1,8,repeats,kNT_unitNone,0,nullptr}
 #define TIME(i) \
     {"S" #i " timing",0,1,0,kNT_unitEnum,0,kModes}, \
@@ -76,8 +81,10 @@ static constexpr int kSlewCount=sizeof(kSlewMilliseconds)/sizeof(kSlewMillisecon
 #define TILTDEPTH(i) \
     {"S" #i " pinch",0,100,50,kNT_unitHasStrings,0,nullptr}, \
     {"S" #i " depth",0,100,100,kNT_unitPercent,0,nullptr}
-#define ANCHOR(i) {"S" #i " pull",-100,100,0,kNT_unitHasStrings,0,nullptr}
+#define ANCHOR(i) {"S" #i " pinch height",-100,100,0,kNT_unitHasStrings,0,nullptr}
 #define WIDTH(i) {"S" #i " pulse width",5,95,50,kNT_unitPercent,0,nullptr}
+#define STEPCOUNT(i) {"S" #i " steps",2,16,8,kNT_unitNone,0,nullptr}
+#define STEPCONTOUR(i) {"S" #i " contour",0,4,0,kNT_unitEnum,0,kStepContours}
 static const _NT_parameter kParameters[] = {
     {"Segments",1,16,4,kNT_unitNone,0,nullptr},
     {"Edit segment",1,16,1,kNT_unitNone,0,nullptr},
@@ -126,7 +133,15 @@ static const _NT_parameter kParameters[] = {
     WIDTH(9), WIDTH(10), WIDTH(11), WIDTH(12),
     WIDTH(13), WIDTH(14), WIDTH(15), WIDTH(16),
     {"Add/Remove",1,16,4,kNT_unitNone,0,nullptr},
-    {"Reset segment",0,1,0,kNT_unitConfirm,0,nullptr}
+    {"Reset segment",0,1,0,kNT_unitConfirm,0,nullptr},
+    STEPCOUNT(1), STEPCOUNT(2), STEPCOUNT(3), STEPCOUNT(4),
+    STEPCOUNT(5), STEPCOUNT(6), STEPCOUNT(7), STEPCOUNT(8),
+    STEPCOUNT(9), STEPCOUNT(10), STEPCOUNT(11), STEPCOUNT(12),
+    STEPCOUNT(13), STEPCOUNT(14), STEPCOUNT(15), STEPCOUNT(16),
+    STEPCONTOUR(1), STEPCONTOUR(2), STEPCONTOUR(3), STEPCONTOUR(4),
+    STEPCONTOUR(5), STEPCONTOUR(6), STEPCONTOUR(7), STEPCONTOUR(8),
+    STEPCONTOUR(9), STEPCONTOUR(10), STEPCONTOUR(11), STEPCONTOUR(12),
+    STEPCONTOUR(13), STEPCONTOUR(14), STEPCONTOUR(15), STEPCONTOUR(16)
 };
 #undef SEG
 #undef TIME
@@ -134,6 +149,8 @@ static const _NT_parameter kParameters[] = {
 #undef TILTDEPTH
 #undef ANCHOR
 #undef WIDTH
+#undef STEPCOUNT
+#undef STEPCONTOUR
 static_assert(sizeof(kParameters)/sizeof(kParameters[0]) == kNumParameters,
               "Parameters must match declared indices");
 
@@ -143,7 +160,7 @@ static const uint8_t kOutputParams[] = {kOutput,kOutputMode,kSlew,kTestOscillato
 struct ShapeLFO : public _NT_algorithm {
     _NT_parameterPage pages[4];
     _NT_parameterPages pageSet;
-    uint8_t editParams[11];
+    uint8_t editParams[13];
     uint8_t sequenceParams[1];
     int16_t countRequest;      // -1 when no absolute-count edit is pending
     bool syncCount;            // non-destructive Segments edit should sync builder
@@ -242,6 +259,10 @@ static void updateEditPage(ShapeLFO* s,bool informHost) {
         s->editParams[next++]=static_cast<uint8_t>(kPulseWidthSlotBase+slot);
     else if(shape==kRampDown || shape==kRampUp)
         s->editParams[next++]=static_cast<uint8_t>(kSculptBase+3*slot);
+    else if(shape==kSteps) {
+        s->editParams[next++]=static_cast<uint8_t>(kStepCountSlotBase+slot);
+        s->editParams[next++]=static_cast<uint8_t>(kStepContourSlotBase+slot);
+    }
     s->editParams[next++]=static_cast<uint8_t>(kTiltSlotBase+2*slot);
     s->editParams[next++]=static_cast<uint8_t>(kAnchorSlotBase+slot);
     s->editParams[next++]=static_cast<uint8_t>(kTiltSlotBase+2*slot+1);
@@ -309,6 +330,8 @@ static void resetSlot(ShapeLFO* s,int slot) {
     setHostParam(s,kTiltSlotBase+2*slot+1,100);
     setHostParam(s,kAnchorSlotBase+slot,0);
     setHostParam(s,kPulseWidthSlotBase+slot,50);
+    setHostParam(s,kStepCountSlotBase+slot,8);
+    setHostParam(s,kStepContourSlotBase+slot,0);
 }
 
 // UI commands are applied during draw(), never inside parameterChanged().
@@ -363,11 +386,38 @@ static inline float bendRamp(float t,int curve) {
     float x=u*u; x*=x;
     return t+(1.0f-x-t)*amount; // fast start, slow finish
 }
-static inline float waveform(int shape,float t,int curve=0,int width=50) {
+// A small parametric staircase library. Each flat hold occupies an equal
+// subdivision. Contours are functions of the discrete step index, not
+// arbitrary points, so even 16-step patterns stay cheap on the NT.
+static inline float stepValue(int step,int n,int contour) {
+    const float up=2.0f*static_cast<float>(step)/static_cast<float>(n-1)-1.0f;
+    if(contour==1)return -up; // Down
+    if(contour==2 || contour==3) {
+        const int other=n-1-step;
+        const int distance=step<other?step:other;
+        const int peak=(n-1)/2;
+        // With two steps, hump/valley fall back to a rising/falling pair.
+        // For >=3 steps the peaks reach +1, including even step counts.
+        const float hump=peak>0 ? -1.0f+2.0f*static_cast<float>(distance)/peak : up;
+        return contour==2?hump:-hump;
+    }
+    if(contour==4)return (step&1)?1.0f:-1.0f; // Alternating holds
+    return up; // Up
+}
+static inline float waveform(int shape,float t,int curve=0,int width=50,
+                             int stepCount=8,int contour=0) {
     t=clampf(t,0.0f,0.999999f);
     if(shape==kRampDown)return 1.0f-2.0f*bendRamp(t,curve);
     if(shape==kRampUp)return 2.0f*bendRamp(t,curve)-1.0f;
     if(shape==kSquare)return t < static_cast<float>(width)*0.01f ? 1.0f:-1.0f;
+    if(shape==kTriangle)return t<0.5f ? -1.0f+4.0f*t : 3.0f-4.0f*t;
+    if(shape==kSteps) {
+        if(stepCount<2)stepCount=2;
+        if(stepCount>16)stepCount=16;
+        int index=static_cast<int>(t*static_cast<float>(stepCount));
+        if(index>=stepCount)index=stepCount-1;
+        return stepValue(index,stepCount,contour);
+    }
     if(shape==kHigh)return 1.0f;
     if(shape==kLow)return -1.0f;
     float p=t*256.0f;
@@ -379,22 +429,26 @@ static inline float waveform(int shape,float t,int curve=0,int width=50) {
 // Normalize a point on the entire chain to its duration-weighted segment.
 // Amplitude envelope interpolates continuously over the whole segment.
 // A four-repeat ramp with Start=100, End=0 creates a shrinking burst.
-// Tilt: 0 = 100% -> 0%, 50 = flat, 100 = 0% -> 100%.
+// Pinch: 0 = 0% -> 100% (narrow left), 50 = flat,
+// 100 = 100% -> 0% (narrow right).
 // Depth scales the resulting envelope, and is per-segment (not global).
 // The envelope is continuous across all repetitions within a segment.
 static inline float amplitudeAt(const ShapeLFO* s,int slot,float inside) {
     const int base=kTiltSlotBase+2*slot;
-    const float tilt=clampf(static_cast<float>(s->v[base])*0.01f,0.0f,1.0f);
+    // UI increases clockwise toward pinching the RIGHT side; invert the
+    // original tilt coordinate, which increased toward the LEFT.
+    const float tilt=1.0f-clampf(static_cast<float>(s->v[base])*0.01f,0.0f,1.0f);
     const float depth=clampf(static_cast<float>(s->v[base+1])*0.01f,0.0f,1.0f);
     const float start=(tilt<=0.5f)?1.0f:(2.0f-2.0f*tilt);
     const float end=(tilt>=0.5f)?1.0f:(2.0f*tilt);
     return depth*(start+(end-start)*inside);
 }
-// Signed anchor: -100 Top, 0 Center, +100 Bottom. The magnitude is
-// how far the target lies from the voltage midpoint. Default 0 preserves
-// the existing centered sound; existing 0..100 presets still work.
+// Pinch Height: -100 Bottom, 0 Center, +100 Top. The magnitude
+// determines the distance from the output-voltage midpoint.
+// Old non-neutral Pull parameter values have their direction reversed.
 static inline float anchorAt(const ShapeLFO* s,int slot) {
-    return clampf(static_cast<float>(s->v[kAnchorSlotBase+slot])*0.01f,-1.0f,1.0f);
+    // Positive height is UP on the NT: invert the original anchor coordinate.
+    return -clampf(static_cast<float>(s->v[kAnchorSlotBase+slot])*0.01f,-1.0f,1.0f);
 }
 static inline float shapedAt(const ShapeLFO* s,int slot,float inside) {
     const int r=repeatsAt(s,slot);
@@ -402,7 +456,9 @@ static inline float shapedAt(const ShapeLFO* s,int slot,float inside) {
     p-=static_cast<float>(static_cast<int>(p));
     const int base=kSculptBase+3*slot;
     return waveform(shapeAt(s,slot),p,s->v[base],
-                    s->v[kPulseWidthSlotBase+slot])*amplitudeAt(s,slot,inside);
+                    s->v[kPulseWidthSlotBase+slot],
+                    s->v[kStepCountSlotBase+slot],
+                    s->v[kStepContourSlotBase+slot])*amplitudeAt(s,slot,inside);
 }
 static float scaleOutput(const ShapeLFO* s,float wave,float envelope,int slot) {
     float center=0.0f,radius=5.0f;
@@ -621,7 +677,8 @@ static bool draw(_NT_algorithm* alg) {
 }
 
 // Custom value text makes these continuous controls understandable on the NT.
-// Stored parameter values retain their original semantics for preset safety.
+// Values are stored at their original IDs, but Pinch/Pinch Height control
+// directions are reversed in v0.4.0; see README for old preset migration.
 static int parameterString(_NT_algorithm*,int param,int value,char* buffer) {
     bool pinch=false;
     bool pull=false;
@@ -634,14 +691,14 @@ static int parameterString(_NT_algorithm*,int param,int value,char* buffer) {
         if(value==50)appendText(p,"None");
         else {
             const int percent=value<50?(50-value)*2:(value-50)*2;
-            appendText(p,value<50?"Right ":"Left ");
+            appendText(p,value<50?"Left ":"Right ");
             appendInt(p,percent);
             *p++='%';
         }
     } else if(pull) {
         if(value==0)appendText(p,"Center");
         else {
-            appendText(p,value<0?"Up ":"Down ");
+            appendText(p,value<0?"Down ":"Up ");
             appendInt(p,value<0?-value:value);
             *p++='%';
         }
@@ -654,7 +711,7 @@ static int parameterString(_NT_algorithm*,int param,int value,char* buffer) {
 
 static const _NT_factory kFactory={
     NT_MULTICHAR('S','L','F','1'),
-    "Shape LFO", "Clocked multi-segment shape LFO (v0.3.6)",
+    "Shape LFO", "Clocked multi-segment shape LFO (v0.4.0)",
     0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
     draw,nullptr,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
     nullptr,nullptr,nullptr,nullptr,parameterString,nullptr
