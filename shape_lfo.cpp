@@ -1,4 +1,4 @@
-// Shape LFO v0.3.4 for Expert Sleepers disting NT
+// Shape LFO v0.3.5 for Expert Sleepers disting NT
 // Copyright (c) 2026. MIT license.
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -34,8 +34,9 @@ enum Param {
     kPulseWidthSlotBase=kAnchorSlotBase+kMaxSegments, // 16 square duty values
     kNumParameters=kPulseWidthSlotBase+kMaxSegments
 };
-enum Shape { kRampDown=0, kRampUp=1, kSine=2, kSquare=3 };
-static char const* const kShapes[] = {"Ramp down", "Ramp up", "Sine", "Square"};
+enum Shape { kRampDown=0, kRampUp=1, kSine=2, kSquare=3, kHigh=4, kLow=5 };
+// Append new shapes only; existing saved shape selections keep their IDs.
+static char const* const kShapes[] = {"Ramp down", "Ramp up", "Sine", "Square", "High", "Low"};
 static char const* const kRanges[] = {"-5 to +5V", "0 to 5V", "0 to 10V"};
 static char const* const kTestModes[] = {"Off", "2 Hz square"};
 static char const* const kBaseDivisions[] = {"1/32", "1/16", "1/8", "1/4", "1/2", "1 bar"};
@@ -48,7 +49,6 @@ static constexpr int kBaseUnits[] = {4,8,16,32,64,128};   // 1/128 bar per unit
 static constexpr int kRelativeFactors[] = {1,2,4,8,16,32}; // /4: 1/4..8
 static constexpr int kFixedUnits[] = {4,8,16,32,64,128,256,512};
 static constexpr int kSlewMilliseconds[] = {0,1,2,5,10,20,40,80,160,320,640,1000};
-static char const* const kAddOptions[] = {"Ready", "Add next"};
 static char const* const kAmpAnchors[] = {"Centered", "From zero"};
 // Per-segment Anchor is signed, preserving old stored settings:
 // -100 = top of selected voltage range, 0 = midpoint, +100 = bottom.
@@ -59,7 +59,7 @@ static constexpr int kSlewCount=sizeof(kSlewMilliseconds)/sizeof(kSlewMillisecon
 // Old parameters retain their exact indices. New per-slot values are separate
 // host-owned parameters, so storing a whole NT preset saves every segment.
 #define SEG(i, shape, repeats) \
-    {"S" #i " shape",0,3,shape,kNT_unitEnum,0,kShapes}, \
+    {"S" #i " shape",0,5,shape,kNT_unitEnum,0,kShapes}, \
     {"S" #i " repeats",1,8,repeats,kNT_unitNone,0,nullptr}
 #define TIME(i) \
     {"S" #i " timing",0,1,0,kNT_unitEnum,0,kModes}, \
@@ -72,10 +72,10 @@ static constexpr int kSlewCount=sizeof(kSlewMilliseconds)/sizeof(kSlewMillisecon
 // Old amp start/end remain hidden in the parameter array for stable indices;
 // v0.3.2 uses the following Tilt/Depth values to generate the envelope.
 #define TILTDEPTH(i) \
-    {"S" #i " tilt",0,100,50,kNT_unitPercent,0,nullptr}, \
+    {"S" #i " amp tilt",0,100,50,kNT_unitPercent,0,nullptr}, \
     {"S" #i " depth",0,100,100,kNT_unitPercent,0,nullptr}
-#define ANCHOR(i) {"S" #i " anchor",-100,100,0,kNT_unitPercent,0,nullptr}
-#define WIDTH(i) {"S" #i " width",5,95,50,kNT_unitPercent,0,nullptr}
+#define ANCHOR(i) {"S" #i " tilt pivot",-100,100,0,kNT_unitPercent,0,nullptr}
+#define WIDTH(i) {"S" #i " pulse width",5,95,50,kNT_unitPercent,0,nullptr}
 static const _NT_parameter kParameters[] = {
     {"Segments",1,16,4,kNT_unitNone,0,nullptr},
     {"Edit segment",1,16,1,kNT_unitNone,0,nullptr},
@@ -104,7 +104,10 @@ static const _NT_parameter kParameters[] = {
     SCULPT(5), SCULPT(6), SCULPT(7), SCULPT(8),
     SCULPT(9), SCULPT(10), SCULPT(11), SCULPT(12),
     SCULPT(13), SCULPT(14), SCULPT(15), SCULPT(16),
-    {"Add segment",0,1,0,kNT_unitEnum,0,kAddOptions},
+    // Signed momentary action: left=-1 removes LAST, right=+1 appends.
+    // kNT_unitNone avoids relying on enum-string indexing for negative values.
+    // Keep neutral=0 to preserve old saved states and parameter IDs.
+    {"Add/Remove",-1,1,0,kNT_unitNone,0,nullptr},
     {"Amp anchor (legacy)",0,1,0,kNT_unitEnum,0,kAmpAnchors},
     TILTDEPTH(1), TILTDEPTH(2), TILTDEPTH(3), TILTDEPTH(4),
     TILTDEPTH(5), TILTDEPTH(6), TILTDEPTH(7), TILTDEPTH(8),
@@ -137,7 +140,7 @@ struct ShapeLFO : public _NT_algorithm {
     _NT_parameterPage pages[3];
     _NT_parameterPages pageSet;
     uint8_t editParams[11];
-    bool addPending;
+    int8_t editPending;
     // Integer sample-clock ticks; one tick increment is 8 * BPM.
     // A segment's duration threshold is sampleRate * 15 * units.
     // Here 1 unit means 1/128 bar (1/32 beat).
@@ -148,7 +151,7 @@ struct ShapeLFO : public _NT_algorithm {
     uint32_t testSamples;
     float slewPrevious;
     bool slewStarted;
-    ShapeLFO():addPending(false),segmentTicks(0),lastThreshold(0),currentSegment(0),
+    ShapeLFO():editPending(0),segmentTicks(0),lastThreshold(0),currentSegment(0),
         previewPhase(0.0f),testSamples(0),slewPrevious(0),slewStarted(false) {
         parameters=kParameters;
         v=nullptr;
@@ -215,7 +218,7 @@ static int totalUnits(const ShapeLFO* s) {
     return sum > 0 ? sum : 1;
 }
 // Keep the often-used controls at the front, and show only shape-relevant
-// detail: Curve for ramps, Width for square, nothing for sine.
+// detail: Curve for ramps, Pulse Width for square, nothing for sine/High/Low.
 static void updateEditPage(ShapeLFO* s,bool informHost) {
     const int slot=selected(s);
     int next=0;
@@ -258,11 +261,11 @@ static void setHostParam(ShapeLFO* s,int param,int value) {
 }
 static void parameterChanged(_NT_algorithm* alg,int param) {
     ShapeLFO* s=static_cast<ShapeLFO*>(alg);
-    // IMPORTANT: never call NT_setParameterFromUi from this callback to
-    // manipulate the command that triggered it. The NT may invoke this
-    // while holding a UI/parameter lock. Queue the action for the UI draw.
+    // Never issue host writes in parameterChanged(). Defer user commands
+    // to draw() after the host has completed the knob-change callback.
     if(param==kAddSegment) {
-        if(s->v[kAddSegment])s->addPending=true;
+        const int action=s->v[kAddSegment];
+        s->editPending=static_cast<int8_t>(action<-1?-1:(action>1?1:action));
         return;
     }
     if(param==kSelected || param==kSlotBase+2*selected(s) ||
@@ -281,30 +284,39 @@ static void parameterChanged(_NT_algorithm* alg,int param) {
 // Apply a queued UI command outside parameterChanged(), avoiding nested
 // host parameter writes while the NT is processing a knob change.
 // This runs from draw() on the UI side, not from the audio callback.
-static void consumeAddRequest(ShapeLFO* s) {
-    if(!s->addPending)return;
-    s->addPending=false;
-    if(!s->v[kAddSegment])return;
-    const int oldCount=count(s);
-    // Restore the momentary command before any other edits.
+static void consumeEditRequest(ShapeLFO* s) {
+    const int action=s->editPending;
+    if(action==0)return;
+    s->editPending=0;
+    if(s->v[kAddSegment]!=action)return; // Ignore cancelled/stale commands.
+    // First restore neutral (legacy preset default), then apply changes.
     setHostParam(s,kAddSegment,0);
+    const int oldCount=count(s);
+    if(action<0) {
+        // Safe/symmetric operation: remove the FINAL segment only. Do not
+        // delete or shift selected middle segments; that's a future editor.
+        if(oldCount<=1)return;
+        setHostParam(s,kLength,oldCount-1);
+        setHostParam(s,kSelected,oldCount-1);
+        return;
+    }
     if(oldCount>=kMaxSegments)return;
     const int slot=oldCount;
+    // Fresh defaults every time, even if this slot existed previously.
     setHostParam(s,kSlotBase+2*slot,kRampDown);
     setHostParam(s,kSlotBase+2*slot+1,1);
     setHostParam(s,timingParam(slot),0);
     setHostParam(s,timingParam(slot)+1,2);
     setHostParam(s,timingParam(slot)+2,2);
     setHostParam(s,kSculptBase+3*slot,0);
-    setHostParam(s,kSculptBase+3*slot+1,100); // legacy defaults
+    setHostParam(s,kSculptBase+3*slot+1,100);
     setHostParam(s,kSculptBase+3*slot+2,100);
-    setHostParam(s,kTiltSlotBase+2*slot,50);  // flat envelope
-    setHostParam(s,kTiltSlotBase+2*slot+1,100); // full depth
-    setHostParam(s,kAnchorSlotBase+slot,0);      // centered fade by default
-    setHostParam(s,kPulseWidthSlotBase+slot,50); // 50% square duty
+    setHostParam(s,kTiltSlotBase+2*slot,50);
+    setHostParam(s,kTiltSlotBase+2*slot+1,100);
+    setHostParam(s,kAnchorSlotBase+slot,0);
+    setHostParam(s,kPulseWidthSlotBase+slot,50);
     setHostParam(s,kLength,oldCount+1);
     setHostParam(s,kSelected,oldCount+1);
-    // Selection parameterChanged calls updateEditPage through the host.
 }
 
 // Small single-cycle sine LUT. No libm required on the embedded target.
@@ -328,6 +340,8 @@ static inline float waveform(int shape,float t,int curve=0,int width=50) {
     if(shape==kRampDown)return 1.0f-2.0f*bendRamp(t,curve);
     if(shape==kRampUp)return 2.0f*bendRamp(t,curve)-1.0f;
     if(shape==kSquare)return t < static_cast<float>(width)*0.01f ? 1.0f:-1.0f;
+    if(shape==kHigh)return 1.0f;
+    if(shape==kLow)return -1.0f;
     float p=t*256.0f;
     int i=static_cast<int>(p);
     if(i<0)i=0;
@@ -514,7 +528,7 @@ static bool draw(_NT_algorithm* alg) {
     int choice=selected(s);
     // Process queued Add on a later UI callback, never while the host is
     // handling the parameterChanged() event that requested it.
-    consumeAddRequest(s);
+    consumeEditRequest(s);
     n=count(s);choice=selected(s);
     char left[64];
     lengthText(left,totalUnits(s));
@@ -581,7 +595,7 @@ static bool draw(_NT_algorithm* alg) {
 
 static const _NT_factory kFactory={
     NT_MULTICHAR('S','L','F','1'),
-    "Shape LFO", "Clocked multi-segment shape LFO (v0.3.4)",
+    "Shape LFO", "Clocked multi-segment shape LFO (v0.3.5)",
     0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
     draw,nullptr,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
     nullptr,nullptr,nullptr,nullptr,nullptr,nullptr
