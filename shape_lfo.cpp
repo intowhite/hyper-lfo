@@ -1,4 +1,4 @@
-// Shape LFO v0.4.0 for Expert Sleepers disting NT
+// Shape LFO v0.4.1 for Expert Sleepers disting NT
 // Copyright (c) 2026. MIT license.
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -36,14 +36,16 @@ enum Param {
     kResetSegment=kEditCount+1,             // confirm before resetting selection
     kStepCountSlotBase=kResetSegment+1, // 16 per-segment staircase counts (append-only)
     kStepContourSlotBase=kStepCountSlotBase+kMaxSegments, // 16 staircase contour modes
-    kNumParameters=kStepContourSlotBase+kMaxSegments
+    kWarp=kStepContourSlotBase+kMaxSegments, // global phase-warp, appended
+    kSquish,                            // global intracycle phase bend
+    kNumParameters
 };
 enum Shape { kRampDown=0, kRampUp=1, kSine=2, kSquare=3, kHigh=4, kLow=5,
              kTriangle=6, kSteps=7 };
 // Append new shapes only; existing saved shape selections keep their IDs.
 static char const* const kShapes[] = {"Ramp down", "Ramp up", "Sine", "Square", "High", "Low",
                                        "Triangle", "Steps"};
-static char const* const kStepContours[] = {"Up", "Down", "Hump", "Valley", "Alternate"};
+static char const* const kStepContours[] = {"Up", "Down", "Hump", "Valley"};
 static char const* const kRanges[] = {"-5 to +5V", "0 to 5V", "0 to 10V"};
 static char const* const kTestModes[] = {"Off", "2 Hz square"};
 static char const* const kBaseDivisions[] = {"1/32", "1/16", "1/8", "1/4", "1/2", "1 bar"};
@@ -70,8 +72,8 @@ static constexpr int kSlewCount=sizeof(kSlewMilliseconds)/sizeof(kSlewMillisecon
     {"S" #i " repeats",1,8,repeats,kNT_unitNone,0,nullptr}
 #define TIME(i) \
     {"S" #i " timing",0,1,0,kNT_unitEnum,0,kModes}, \
-    {"S" #i " rel duration",0,5,2,kNT_unitEnum,0,kRelativeDurations}, \
-    {"S" #i " fixed duration",0,7,2,kNT_unitEnum,0,kFixedDurations}
+    {"S" #i " duration",0,5,2,kNT_unitEnum,0,kRelativeDurations}, \
+    {"S" #i " duration",0,7,2,kNT_unitEnum,0,kFixedDurations}
 #define SCULPT(i) \
     {"S" #i " curve",-100,100,0,kNT_unitNone,0,nullptr}, \
     {"S" #i " amp start",0,100,100,kNT_unitPercent,0,nullptr}, \
@@ -84,7 +86,7 @@ static constexpr int kSlewCount=sizeof(kSlewMilliseconds)/sizeof(kSlewMillisecon
 #define ANCHOR(i) {"S" #i " pinch height",-100,100,0,kNT_unitHasStrings,0,nullptr}
 #define WIDTH(i) {"S" #i " pulse width",5,95,50,kNT_unitPercent,0,nullptr}
 #define STEPCOUNT(i) {"S" #i " steps",2,16,8,kNT_unitNone,0,nullptr}
-#define STEPCONTOUR(i) {"S" #i " contour",0,4,0,kNT_unitEnum,0,kStepContours}
+#define STEPCONTOUR(i) {"S" #i " contour",0,3,0,kNT_unitEnum,0,kStepContours}
 static const _NT_parameter kParameters[] = {
     {"Segments",1,16,4,kNT_unitNone,0,nullptr},
     {"Edit segment",1,16,1,kNT_unitNone,0,nullptr},
@@ -141,7 +143,9 @@ static const _NT_parameter kParameters[] = {
     STEPCONTOUR(1), STEPCONTOUR(2), STEPCONTOUR(3), STEPCONTOUR(4),
     STEPCONTOUR(5), STEPCONTOUR(6), STEPCONTOUR(7), STEPCONTOUR(8),
     STEPCONTOUR(9), STEPCONTOUR(10), STEPCONTOUR(11), STEPCONTOUR(12),
-    STEPCONTOUR(13), STEPCONTOUR(14), STEPCONTOUR(15), STEPCONTOUR(16)
+    STEPCONTOUR(13), STEPCONTOUR(14), STEPCONTOUR(15), STEPCONTOUR(16),
+    {"Warp",5,95,50,kNT_unitPercent,0,nullptr},
+    {"Squish",-100,100,0,kNT_unitPercent,0,nullptr}
 };
 #undef SEG
 #undef TIME
@@ -156,11 +160,12 @@ static_assert(sizeof(kParameters)/sizeof(kParameters[0]) == kNumParameters,
 
 static const uint8_t kMainParams[] = {kBpm,kBaseDivision,kRange,kAmplitude,kOffset};
 static const uint8_t kOutputParams[] = {kOutput,kOutputMode,kSlew,kTestOscillator};
+static const uint8_t kShapeFxParams[] = {kWarp,kSquish};
 
 struct ShapeLFO : public _NT_algorithm {
-    _NT_parameterPage pages[4];
+    _NT_parameterPage pages[5];
     _NT_parameterPages pageSet;
-    uint8_t editParams[13];
+    uint8_t editParams[14];
     uint8_t sequenceParams[1];
     int16_t countRequest;      // -1 when no absolute-count edit is pending
     bool syncCount;            // non-destructive Segments edit should sync builder
@@ -198,7 +203,8 @@ struct ShapeLFO : public _NT_algorithm {
         pages[1]={"Edit",11,0,{0,0},editParams};
         pages[2]={"Output",4,0,{0,0},kOutputParams};
         pages[3]={"Sequence",1,0,{0,0},sequenceParams};
-        pageSet={4,pages};
+        pages[4]={"Shape FX",2,0,{0,0},kShapeFxParams};
+        pageSet={5,pages};
         parameterPages=&pageSet;
     }
 };
@@ -246,7 +252,7 @@ static int totalUnits(const ShapeLFO* s) {
     return sum > 0 ? sum : 1;
 }
 // Keep the often-used controls at the front, and show only shape-relevant
-// detail: Curve for ramps, Pulse Width for square, nothing for sine/High/Low.
+// detail: Curve for ramps/Steps, Pulse Width for square, nothing for sine/High/Low.
 static void updateEditPage(ShapeLFO* s,bool informHost) {
     const int slot=selected(s);
     int next=0;
@@ -262,6 +268,7 @@ static void updateEditPage(ShapeLFO* s,bool informHost) {
     else if(shape==kSteps) {
         s->editParams[next++]=static_cast<uint8_t>(kStepCountSlotBase+slot);
         s->editParams[next++]=static_cast<uint8_t>(kStepContourSlotBase+slot);
+        s->editParams[next++]=static_cast<uint8_t>(kSculptBase+3*slot);
     }
     s->editParams[next++]=static_cast<uint8_t>(kTiltSlotBase+2*slot);
     s->editParams[next++]=static_cast<uint8_t>(kAnchorSlotBase+slot);
@@ -401,8 +408,79 @@ static inline float stepValue(int step,int n,int contour) {
         const float hump=peak>0 ? -1.0f+2.0f*static_cast<float>(distance)/peak : up;
         return contour==2?hump:-hump;
     }
-    if(contour==4)return (step&1)?1.0f:-1.0f; // Alternating holds
     return up; // Up
+}
+// Low-cost half sine from the existing wave LUT. 0 at both step edges,
+// 1 at mid-step. No trig functions or runtime math-library dependencies.
+static inline float halfSine(float t) {
+    const float at=clampf(t,0.0f,1.0f)*128.0f;
+    int i=static_cast<int>(at);
+    if(i>=128)return 0.0f;
+    return kSineCycle[i]+(kSineCycle[i+1]-kSineCycle[i])*(at-i);
+}
+static inline float smooth01(float t) {
+    t=clampf(t,0.0f,1.0f);
+    return t*t*(3.0f-2.0f*t);
+}
+// Warp/Squish are TIME-domain phase transforms, not voltage transforms.
+// Both are monotonic, leaving an entire segment and its repeats in time.
+// These deliberately match the Clocked Wavetable LFO shaping equations.
+static inline float phaseWarp(float t,float skew) {
+    skew=clampf(skew,0.05f,0.95f);
+    const float a=(1.0f-skew)/skew;
+    return (a*t)/(1.0f+(a-1.0f)*t);
+}
+static inline float phaseSquish(float t,float squish) {
+    const float pos=clampf(t,0.0f,1.0f)*256.0f;
+    int i=static_cast<int>(pos);
+    if(i>=256)return t;
+    const float sine=kSineCycle[i]+(kSineCycle[i+1]-kSineCycle[i])*(pos-i);
+    return t+(0.9f*squish)*(sine*0.15915494309f); // 1 / 2pi
+}
+static inline float shapedPhase(float phase,int warp,int squish) {
+    phase=phaseSquish(phase,clampf(squish*0.01f,-1.0f,1.0f));
+    return clampf(phaseWarp(phase,warp*0.01f),0.0f,0.999999f);
+}
+// Curve of stepped contours. 0 keeps the original hard staircase.
+// Negative progressively adds scoops to each hold.
+// Positive rounds transitions, then becomes one arch per rhythmic step.
+static inline float curvedStep(float t,int count,int contour,int curve) {
+    int i=static_cast<int>(t*count);
+    if(i>=count)i=count-1;
+    const float level=stepValue(i,count,contour);
+    if(curve==0)return level;
+    const int neighbor=(i+1<count)?i+1:i;
+    const float next=stepValue(neighbor,count,contour);
+    float u=t*count-static_cast<float>(i);
+    u=clampf(u,0.0f,1.0f);
+    if(curve>0 && curve<=50) {
+        // Increasingly round the corners into the next step, preserving
+        // an initial plateau; no smoothing if the next level is equal.
+        const float width=0.015f+0.7f*static_cast<float>(curve)*0.02f;
+        const float alpha=smooth01((u-(1.0f-width))/width);
+        return level+(next-level)*alpha;
+    }
+    float direction=(next>=level)?1.0f:-1.0f;
+    float delta=next-level;
+    if(delta<0.0f)delta=-delta;
+    if(delta<0.0001f && i>0) {
+        float prev=stepValue(i-1,count,contour);
+        direction=(level>=prev)?1.0f:-1.0f;
+        delta=level-prev;
+        if(delta<0.0f)delta=-delta;
+    }
+    // The arch/scoop is bound by the output range. It may temporarily
+    // diverge from adjacent step voltages, but never from [-1,+1].
+    const float signedDirection=curve<0?-direction:direction;
+    const float headroom=signedDirection>0.0f?1.0f-level:level+1.0f;
+    const float reach=clampf(delta,0.0f,headroom);
+    const float arch=level+signedDirection*reach*halfSine(u);
+    if(curve<0)return level+(arch-level)*(-curve*0.01f);
+    // At +50 a fully rounded transition. +100 yields an arch followed
+    // by the next stair jump, exactly as in the user's drawn examples.
+    const float round=level+(next-level)*smooth01(u);
+    const float mix=(curve-50)*0.02f;
+    return clampf(round+(arch-round)*mix,-1.0f,1.0f);
 }
 static inline float waveform(int shape,float t,int curve=0,int width=50,
                              int stepCount=8,int contour=0) {
@@ -414,9 +492,8 @@ static inline float waveform(int shape,float t,int curve=0,int width=50,
     if(shape==kSteps) {
         if(stepCount<2)stepCount=2;
         if(stepCount>16)stepCount=16;
-        int index=static_cast<int>(t*static_cast<float>(stepCount));
-        if(index>=stepCount)index=stepCount-1;
-        return stepValue(index,stepCount,contour);
+        if(contour<0 || contour>3)contour=0; // legacy Alternate -> Up
+        return curvedStep(t,stepCount,contour,curve);
     }
     if(shape==kHigh)return 1.0f;
     if(shape==kLow)return -1.0f;
@@ -454,6 +531,7 @@ static inline float shapedAt(const ShapeLFO* s,int slot,float inside) {
     const int r=repeatsAt(s,slot);
     float p=inside*static_cast<float>(r);
     p-=static_cast<float>(static_cast<int>(p));
+    p=shapedPhase(p,s->v[kWarp],s->v[kSquish]);
     const int base=kSculptBase+3*slot;
     return waveform(shapeAt(s,slot),p,s->v[base],
                     s->v[kPulseWidthSlotBase+slot],
@@ -711,7 +789,7 @@ static int parameterString(_NT_algorithm*,int param,int value,char* buffer) {
 
 static const _NT_factory kFactory={
     NT_MULTICHAR('S','L','F','1'),
-    "Shape LFO", "Clocked multi-segment shape LFO (v0.4.0)",
+    "Shape LFO", "Clocked multi-segment shape LFO (v0.4.1)",
     0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
     draw,nullptr,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
     nullptr,nullptr,nullptr,nullptr,parameterString,nullptr
