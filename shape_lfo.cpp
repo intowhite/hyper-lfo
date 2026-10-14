@@ -1,4 +1,4 @@
-// Shape LFO v0.2.0 for Expert Sleepers disting NT
+// Shape LFO v0.2.1 for Expert Sleepers disting NT
 // Copyright (c) 2026. MIT license.
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -32,11 +32,13 @@ static char const* const kBaseDivisions[] = {"1/32", "1/16", "1/8", "1/4", "1/2"
 static char const* const kModes[] = {"Follow base", "Fixed note"};
 static char const* const kRelativeDurations[] = {"x1/4", "x1/2", "x1", "x2", "x4", "x8"};
 static char const* const kFixedDurations[] = {"1/32", "1/16", "1/8", "1/4", "1/2", "1 bar", "2 bars", "4 bars"};
-static char const* const kSlewTimes[] = {"Off", "1 ms", "2 ms", "5 ms", "10 ms", "20 ms"};
+static char const* const kSlewTimes[] = {"Off", "1 ms", "2 ms", "5 ms", "10 ms", "20 ms",
+    "40 ms", "80 ms", "160 ms", "320 ms", "640 ms", "1000 ms"};
 static constexpr int kBaseUnits[] = {4,8,16,32,64,128};   // 1/128 bar per unit
 static constexpr int kRelativeFactors[] = {1,2,4,8,16,32}; // /4: 1/4..8
 static constexpr int kFixedUnits[] = {4,8,16,32,64,128,256,512};
-static constexpr int kSlewMilliseconds[] = {0,1,2,5,10,20};
+static constexpr int kSlewMilliseconds[] = {0,1,2,5,10,20,40,80,160,320,640,1000};
+static constexpr int kSlewCount=sizeof(kSlewMilliseconds)/sizeof(kSlewMilliseconds[0]);
 
 // Old parameters retain their exact indices. New per-slot values are separate
 // host-owned parameters, so storing a whole NT preset saves every segment.
@@ -65,8 +67,8 @@ static const _NT_parameter kParameters[] = {
     SEG(13,kRampDown,1), SEG(14,kRampDown,1),
     SEG(15,kRampDown,1), SEG(16,kRampDown,1),
     {"Test oscillator",0,1,0,kNT_unitEnum,0,kTestModes},
-    {"Base division",0,5,2,kNT_unitEnum,0,kBaseDivisions},
-    {"Output slew",0,5,0,kNT_unitEnum,0,kSlewTimes},
+    {"Base division",0,5,3,kNT_unitEnum,0,kBaseDivisions},
+    {"Output slew",0,kSlewCount-1,0,kNT_unitEnum,0,kSlewTimes},
     TIME(1), TIME(2), TIME(3), TIME(4),
     TIME(5), TIME(6), TIME(7), TIME(8),
     TIME(9), TIME(10), TIME(11), TIME(12),
@@ -262,7 +264,7 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     const uint32_t halfTestCycle=sampleRate/4;
     const int slewChoice=s->v[kSlew];
     float maxSlew=0.0f;
-    if(slewChoice>0 && slewChoice<6) {
+    if(slewChoice>0 && slewChoice<kSlewCount) {
         maxSlew=10000.0f/(static_cast<float>(sampleRate)*
                             static_cast<float>(kSlewMilliseconds[slewChoice]));
         // 10V of movement over the selected number of milliseconds.
@@ -346,15 +348,18 @@ static bool draw(_NT_algorithm* alg) {
     int choice=selected(s);
     char left[64];
     lengthText(left,totalUnits(s));
-    NT_drawText(3,12,left,11,kNT_textLeft,kNT_textTiny);
+    // The NT parameter/options overlay can cover the upper display row.
+    // Reserve a separate lower status strip so these labels remain readable.
+    NT_drawText(3,58,left,11,kNT_textLeft,kNT_textTiny);
     char right[32];
     char* r=right;
     *r++='S';appendInt(r,choice+1);
     *r++=' ';*r++='x';appendInt(r,repeatsAt(s,choice));
     *r++=' ';appendText(r,modeAt(s,choice)?"FIX":"REL");*r=0;
-    NT_drawText(251,12,s->v[kTestOscillator]?"TEST 2HZ":right,14,kNT_textRight,kNT_textTiny);
-    const int x0=4,x1=251,y0=20,y1=60;
-    NT_drawShapeI(kNT_line,x0,40,x1,40,3);
+    NT_drawText(251,58,s->v[kTestOscillator]?"TEST 2HZ":right,14,kNT_textRight,kNT_textTiny);
+    const int x0=4,x1=251,y0=15,y1=49;
+    constexpr int kWaveCenter=32, kWaveHeight=14;
+    NT_drawShapeI(kNT_line,x0,kWaveCenter,x1,kWaveCenter,3);
     const int total=totalUnits(s);
     int start=0;
     int selectL=x0,selectR=x0;
@@ -378,10 +383,10 @@ static bool draw(_NT_algorithm* alg) {
         int oldSlot=0,newSlot=0;
         float prevWave=evaluateAtUnits(s,prevPos,&oldSlot);
         float nextWave=evaluateAtUnits(s,nextPos,&newSlot);
-        int yPrev=40-static_cast<int>(prevWave*18.0f);
-        int y=40-static_cast<int>(nextWave*18.0f);
+        int yPrev=kWaveCenter-static_cast<int>(prevWave*kWaveHeight);
+        int y=kWaveCenter-static_cast<int>(nextWave*kWaveHeight);
         if(oldSlot!=newSlot && newSlot<n) {
-            int endY=40-static_cast<int>(waveform(shapeAt(s,oldSlot),0.999999f)*18.0f);
+            int endY=kWaveCenter-static_cast<int>(waveform(shapeAt(s,oldSlot),0.999999f)*kWaveHeight);
             NT_drawShapeI(kNT_line,x0+x-1,yPrev,x0+x,endY,14);
             NT_drawShapeI(kNT_line,x0+x,endY,x0+x,y,14);
         } else {
@@ -389,13 +394,13 @@ static bool draw(_NT_algorithm* alg) {
         }
     }
     int cursor=x0+static_cast<int>(s->previewPhase*(x1-x0));
-    NT_drawShapeI(kNT_line,cursor,18,cursor,61,9);
+    NT_drawShapeI(kNT_line,cursor,14,cursor,50,9);
     return false;
 }
 
 static const _NT_factory kFactory={
     NT_MULTICHAR('S','L','F','1'),
-    "Shape LFO", "Clocked multi-segment shape LFO (v0.2.0)",
+    "Shape LFO", "Clocked multi-segment shape LFO (v0.2.1)",
     0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
     draw,nullptr,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
     nullptr,nullptr,nullptr,nullptr,nullptr,nullptr
