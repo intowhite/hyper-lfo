@@ -1,4 +1,4 @@
-// Shape LFO v0.5.0 experimental for Expert Sleepers disting NT
+// Shape LFO v0.5.1 performance/editor patch for Expert Sleepers disting NT
 // Copyright (c) 2026. MIT license.
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -12,36 +12,6 @@ inline void* operator new(size_t, void* p) noexcept { return p; }
 namespace {
 constexpr int kMaxSegments = 16;
 
-// Legacy numeric IDs below are local DSP adapter identifiers ONLY.
-// The NT host uses the compact SharedParameter list in v0.5.
-enum Param {
-    kLength=0, kSelected, kBpm, kRange, kAmplitude, kOffset,
-    kOutput, kOutputMode,
-    kSlotBase,                          // 16 * 2 existing shape/repeats
-    kTestOscillator=kSlotBase+kMaxSegments*2,
-    kBaseDivision=kTestOscillator+1,
-    kSlew,
-    kTimeSlotBase,                      // 16 * 3: mode/relative/fixed
-    // Historical layout retained only to reuse the verified DSP functions.
-    kSculptBase=kTimeSlotBase+kMaxSegments*3, // curve, amp start/end
-    kAddSegment=kSculptBase+kMaxSegments*3,   // momentary action
-    kAmpAnchor=kAddSegment+1,           // retained as legacy preset parameter
-    kTiltSlotBase=kAmpAnchor+1,        // 16*2 tilt/depth settings
-    kCenteredMix=kTiltSlotBase+kMaxSegments*2,
-    kZeroMix=kCenteredMix+1,
-    // Keep legacy global mixes at their original IDs for old NT presets.
-    kAnchorSlotBase=kZeroMix+1,           // 16 independent fade anchors
-    kPulseWidthSlotBase=kAnchorSlotBase+kMaxSegments, // 16 square duty values
-    kEditCount=kPulseWidthSlotBase+kMaxSegments, // persistent absolute builder count
-    kResetSegment=kEditCount+1,             // confirm before resetting selection
-    kStepCountSlotBase=kResetSegment+1, // 16 per-segment staircase counts (append-only)
-    kStepContourSlotBase=kStepCountSlotBase+kMaxSegments, // 16 staircase contour modes
-    // Reuse two dormant legacy parameter IDs. Keep total at 241, the
-    // exact parameter count of the hardware-validated v0.4.0 release.
-    kWarp=kAmpAnchor,                   // formerly legacy global amp anchor (0 / 1)
-    kSquish=kAddSegment,                // formerly unused momentary add (neutral 0)
-    kNumParameters=kStepContourSlotBase+kMaxSegments
-};
 enum Shape { kRampDown=0, kRampUp=1, kSine=2, kSquare=3, kHigh=4, kLow=5,
              kTriangle=6, kSteps=7 };
 // Append new shapes only; existing saved shape selections keep their IDs.
@@ -139,7 +109,7 @@ struct ShapeLFO : public _NT_algorithm {
   sequenceParams[0]=pSegments;
   // Populate the Edit page before the NT's very first UI draw. No
   // callback can rely on v[] until the host has attached its values.
-  const uint8_t initialEdit[]={pSelected,pShape,pRepeats,pRelDuration,pCurve,
+  const uint8_t initialEdit[]={pSelected,pShape,pRelDuration,pRepeats,pCurve,
       pPinch,pHeight,pDepth,pTiming,pReset,pEditCount};
   for(int i=0;i<11;++i)editParams[i]=initialEdit[i];
   pages[0]={"Main",5,0,{0,0},mainParams};
@@ -157,43 +127,6 @@ static int count(const ShapeLFO* s){
 static int selected(const ShapeLFO* s){
  int n=s->v[pSelected]-1;return n<0?0:(n>=kMaxSegments?kMaxSegments-1:n);
 }
-// Keep the tested DSP code unchanged via an ID-to-storage adapter.
-// These legacy symbolic IDs are NOT registered with the NT host.
-static int V(const ShapeLFO* s,int old){
- const int16_t* v=s->v;
- if(old==kLength)return v[pSegments];
- if(old==kSelected)return v[pSelected];
- if(old==kBpm)return v[pBpm];
- if(old==kRange)return v[pRange];
- if(old==kAmplitude)return v[pAmplitude];
- if(old==kOffset)return v[pOffset];
- if(old==kOutput)return v[pOutput];
- if(old==kOutputMode)return v[pOutputMode];
- if(old==kTestOscillator)return v[pTest];
- if(old==kBaseDivision)return v[pBaseDivision];
- if(old==kSlew)return v[pSlew];
- if(old==kWarp)return v[pWarp];
- if(old==kSquish)return v[pSquish];
- if(old>=kSlotBase && old<kSlotBase+32){
-  const Segment& g=s->segments[(old-kSlotBase)/2];return (old-kSlotBase)%2?g.repeats:g.shape;
- }
- if(old>=kTimeSlotBase && old<kTimeSlotBase+48){
-  const Segment& g=s->segments[(old-kTimeSlotBase)/3];
-  switch((old-kTimeSlotBase)%3){case 0:return g.timing;case 1:return g.relative;default:return g.fixed;}
- }
- if(old>=kSculptBase && old<kSculptBase+48){
-  const Segment& g=s->segments[(old-kSculptBase)/3];return (old-kSculptBase)%3==0?g.curve:100;
- }
- if(old>=kTiltSlotBase && old<kTiltSlotBase+32){
-  const Segment& g=s->segments[(old-kTiltSlotBase)/2];return (old-kTiltSlotBase)%2?g.depth:g.pinch;
- }
- if(old>=kAnchorSlotBase && old<kAnchorSlotBase+16)return s->segments[old-kAnchorSlotBase].height;
- if(old>=kPulseWidthSlotBase && old<kPulseWidthSlotBase+16)return s->segments[old-kPulseWidthSlotBase].width;
- if(old>=kStepCountSlotBase && old<kStepCountSlotBase+16)return s->segments[old-kStepCountSlotBase].steps;
- if(old>=kStepContourSlotBase && old<kStepContourSlotBase+16)return s->segments[old-kStepContourSlotBase].contour;
- return 0;
-}
-static int shapeAt(const ShapeLFO* s,int i){return s->segments[i].shape;}
 static int repeatsAt(const ShapeLFO* s,int i){const int v=s->segments[i].repeats;return v<1?1:(v>8?8:v);}
 static int modeAt(const ShapeLFO* s,int i){return s->segments[i].timing?1:0;}
 static int durationUnits(const ShapeLFO* s,int i){
@@ -214,8 +147,8 @@ static void updateEditPage(ShapeLFO* s,bool informHost){
  const Segment& g=s->segments[selected(s)];
  s->editParams[next++]=pSelected;
  s->editParams[next++]=pShape;
- s->editParams[next++]=pRepeats;
  s->editParams[next++]=g.timing?pFixedDuration:pRelDuration;
+ s->editParams[next++]=pRepeats;
  if(g.shape==kSquare)s->editParams[next++]=pWidth;
  else if(g.shape==kSteps){
   s->editParams[next++]=pSteps;s->editParams[next++]=pContour;s->editParams[next++]=pCurve;
@@ -348,8 +281,11 @@ static inline float phaseSquish(float t,float squish) {
     return t+(0.9f*squish)*(sine*0.15915494309f); // 1 / 2pi
 }
 static inline float shapedPhase(float phase,int warp,int squish) {
-    phase=phaseSquish(phase,clampf(squish*0.01f,-1.0f,1.0f));
-    return clampf(phaseWarp(phase,warp*0.01f),0.0f,0.999999f);
+    // Common case: neutral Shape FX. Avoid a LUT lookup and per-sample
+    // division when the transforms would return the original phase.
+    if(squish!=0)phase=phaseSquish(phase,clampf(squish*0.01f,-1.0f,1.0f));
+    if(warp!=50)phase=phaseWarp(phase,warp*0.01f);
+    return clampf(phase,0.0f,0.999999f);
 }
 // Curve of stepped contours. 0 keeps the original hard staircase.
 // Negative progressively adds scoops to each hold.
@@ -426,11 +362,11 @@ static inline float waveform(int shape,float t,int curve=0,int width=50,
 // Depth scales the resulting envelope, and is per-segment (not global).
 // The envelope is continuous across all repetitions within a segment.
 static inline float amplitudeAt(const ShapeLFO* s,int slot,float inside) {
-    const int base=kTiltSlotBase+2*slot;
+    const Segment& seg=s->segments[slot];
     // UI increases clockwise toward pinching the RIGHT side; invert the
     // original tilt coordinate, which increased toward the LEFT.
-    const float tilt=1.0f-clampf(static_cast<float>(V(s,base))*0.01f,0.0f,1.0f);
-    const float depth=clampf(static_cast<float>(V(s,base+1))*0.01f,0.0f,1.0f);
+    const float tilt=1.0f-clampf(static_cast<float>(seg.pinch)*0.01f,0.0f,1.0f);
+    const float depth=clampf(static_cast<float>(seg.depth)*0.01f,0.0f,1.0f);
     const float start=(tilt<=0.5f)?1.0f:(2.0f-2.0f*tilt);
     const float end=(tilt>=0.5f)?1.0f:(2.0f*tilt);
     return depth*(start+(end-start)*inside);
@@ -440,38 +376,36 @@ static inline float amplitudeAt(const ShapeLFO* s,int slot,float inside) {
 // Old non-neutral Pull parameter values have their direction reversed.
 static inline float anchorAt(const ShapeLFO* s,int slot) {
     // Positive height is UP on the NT: invert the original anchor coordinate.
-    return -clampf(static_cast<float>(V(s,kAnchorSlotBase+slot))*0.01f,-1.0f,1.0f);
+    return -clampf(static_cast<float>(s->segments[slot].height)*0.01f,-1.0f,1.0f);
 }
-static inline float shapedAt(const ShapeLFO* s,int slot,float inside) {
-    const int r=repeatsAt(s,slot);
+static inline float shapedAt(const ShapeLFO* s,int slot,float inside,float envelope) {
+    const Segment& seg=s->segments[slot];
+    const int r=seg.repeats<1?1:(seg.repeats>8?8:seg.repeats);
     float p=inside*static_cast<float>(r);
     p-=static_cast<float>(static_cast<int>(p));
-    p=shapedPhase(p,50+V(s,kWarp),V(s,kSquish));
-    const int base=kSculptBase+3*slot;
-    return waveform(shapeAt(s,slot),p,V(s,base),
-                    V(s,kPulseWidthSlotBase+slot),
-                    V(s,kStepCountSlotBase+slot),
-                    V(s,kStepContourSlotBase+slot))*amplitudeAt(s,slot,inside);
+    p=shapedPhase(p,50+s->v[pWarp],s->v[pSquish]);
+    return waveform(seg.shape,p,seg.curve,seg.width,seg.steps,seg.contour)
+         *envelope;
 }
 static float scaleOutput(const ShapeLFO* s,float wave,float envelope,int slot) {
     float center=0.0f,radius=5.0f;
-    if(V(s,kRange)==1){center=2.5f;radius=2.5f;}
-    else if(V(s,kRange)==2){center=5.0f;radius=5.0f;}
-    const float amp=V(s,kAmplitude)*0.01f;
+    if(s->v[pRange]==1){center=2.5f;radius=2.5f;}
+    else if(s->v[pRange]==2){center=5.0f;radius=5.0f;}
+    const float amp=s->v[pAmplitude]*0.01f;
     // `wave` already includes the segment envelope. When envelope=1 and
     // amp=100%, all anchor positions produce the same full-range waveform.
     // As amplitude decreases, the waveform converges toward `base`:
     // bottom=0V, center=5V, top=10V in a 0..10V range.
     const float base=center-radius*anchorAt(s,slot);
     float volts=base+amp*(radius*wave+(center-base)*envelope);
-    volts+=V(s,kOffset)*0.001f;
+    volts+=s->v[pOffset]*0.001f;
     return clampf(volts,-10.0f,10.0f);
 }
 // The preview uses exactly the same output-voltage transform as the DSP.
 // Unlike the audio path, it does not simulate output slew.
 static float previewVoltsAt(const ShapeLFO* s,int slot,float inside) {
-    return scaleOutput(s,shapedAt(s,slot,inside),
-                       amplitudeAt(s,slot,inside),slot);
+    const float envelope=amplitudeAt(s,slot,inside);
+    return scaleOutput(s,shapedAt(s,slot,inside,envelope),envelope,slot);
 }
 static float evaluateAtUnits(const ShapeLFO* s,float position,int* activeSlot) {
     int n=count(s);
@@ -496,13 +430,13 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     ShapeLFO* s=static_cast<ShapeLFO*>(alg);
     const int frames=numFramesBy4*4;
     if(frames<=0)return;
-    const int bus=V(s,kOutput);
+    const int bus=s->v[pOutput];
     float* out=bus>0 ? buses+(bus-1)*frames : nullptr;
-    const bool replace=V(s,kOutputMode)!=0;
+    const bool replace=s->v[pOutputMode]!=0;
     const uint32_t sampleRate =
         (NT_globals.sampleRate >= 8000 && NT_globals.sampleRate <= 192000)
         ? NT_globals.sampleRate : 48000;
-    int bpm=V(s,kBpm);
+    int bpm=s->v[pBpm];
     if(bpm<20)bpm=20;
     if(bpm>300)bpm=300;
     uint32_t ticks=s->segmentTicks;
@@ -519,7 +453,7 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     float invThreshold=1.0f/static_cast<float>(threshold);
     uint32_t testSamples=s->testSamples;
     const uint32_t halfTestCycle=sampleRate/4;
-    const int slewChoice=V(s,kSlew);
+    const int slewChoice=s->v[pSlew];
     float maxSlew=0.0f;
     if(slewChoice>0 && slewChoice<kSlewCount) {
         maxSlew=10000.0f/(static_cast<float>(sampleRate)*
@@ -532,14 +466,14 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     for(int i=0;i<frames;++i) {
         float wave;
         float envelope=1.0f;
-        if(V(s,kTestOscillator)) {
+        if(s->v[pTest]) {
             wave=testSamples<halfTestCycle?1.0f:-1.0f;
             ++testSamples;
             if(testSamples>=halfTestCycle*2)testSamples=0;
         } else {
             const float fractional=static_cast<float>(ticks)*invThreshold;
-            wave=shapedAt(s,slot,fractional);
             envelope=amplitudeAt(s,slot,fractional);
+            wave=shapedAt(s,slot,fractional,envelope);
         }
         float volts=scaleOutput(s,wave,envelope,slot);
         if(maxSlew>0.0f) {
@@ -616,15 +550,15 @@ static bool draw(_NT_algorithm* alg) {
     *r++='S';appendInt(r,choice+1);
     *r++=' ';*r++='x';appendInt(r,repeatsAt(s,choice));
     *r++=' ';appendText(r,modeAt(s,choice)?"FIX":"REL");*r=0;
-    NT_drawText(251,58,V(s,kTestOscillator)?"TEST 2HZ":right,14,kNT_textRight,kNT_textTiny);
+    NT_drawText(251,58,s->v[pTest]?"TEST 2HZ":right,14,kNT_textRight,kNT_textTiny);
     const int x0=4,x1=251,y0=15,y1=49;
     // Show the ACTUAL output range, not a signed LFO normalized to +/-1.
     // In a unipolar mode the horizontal baseline means zero volts, at the
     // BOTTOM of the plot; in bipolar mode it marks 0V at the CENTER.
     float viewMin=-5.0f,viewMax=5.0f;
-    if(V(s,kRange)==1){viewMin=0.0f;viewMax=5.0f;}
-    else if(V(s,kRange)==2){viewMin=0.0f;viewMax=10.0f;}
-    const int zeroY=(V(s,kRange)==0)?(y0+y1)/2:y1;
+    if(s->v[pRange]==1){viewMin=0.0f;viewMax=5.0f;}
+    else if(s->v[pRange]==2){viewMin=0.0f;viewMax=10.0f;}
+    const int zeroY=(s->v[pRange]==0)?(y0+y1)/2:y1;
     NT_drawShapeI(kNT_line,x0,zeroY,x1,zeroY,3);
     const float pixelsPerVolt=static_cast<float>(y1-y0)/(viewMax-viewMin);
     auto toY=[&](float volts) -> int {
@@ -684,7 +618,7 @@ static int parameterString(_NT_algorithm*,int param,int value,char* buffer){
  *p=0;return static_cast<int>(p-buffer);
 }
 static const _NT_factory kFactory={
- NT_MULTICHAR('S','L','F','2'),"Shape LFO","Shared-editor shape LFO (v0.5.0 experimental)",
+ NT_MULTICHAR('S','L','F','2'),"Shape LFO","Shared-editor shape LFO (v0.5.1)",
  0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
  draw,nullptr,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
  nullptr,nullptr,nullptr,nullptr,parameterString,nullptr
