@@ -1,0 +1,4 @@
+distingNT_API/
+*.o
+tests/host_test_bin
+.DS_Store

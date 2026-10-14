@@ -1,0 +1,68 @@
+name: Build Shape LFO for Disting NT
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write # Only the optional tagged release step uses write access.
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install GNU Arm Toolchain (same version as proven local build)
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: '14.2.Rel1'
+
+      - name: Get official Expert Sleepers SDK
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/expertsleepersltd/distingNT_API.git distingNT_API
+          test -f distingNT_API/include/distingnt/api.h
+          echo "SDK commit: $(git -C distingNT_API rev-parse HEAD)"
+
+      - name: Run host-side tests
+        shell: bash
+        run: bash tests/run.sh
+
+      - name: Build Disting NT plugin
+        shell: bash
+        run: |
+          arm-none-eabi-g++ --version | head -1
+          bash build.sh ./distingNT_API
+
+      - name: Validate object file
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s shape_lfo.o
+          file shape_lfo.o
+          arm-none-eabi-readelf -h shape_lfo.o
+          arm-none-eabi-nm -u shape_lfo.o
+          # Don't ship output if the compiler inserted unsupported runtime helpers.
+          if arm-none-eabi-nm -u shape_lfo.o | grep -E '(__aeabi_|memcpy|memset|malloc|free|_Znwm|_Znam)'; then
+            echo 'Unexpected runtime helper detected' >&2
+            exit 1
+          fi
+
+      - name: Downloadable build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Shape-LFO-${{ github.sha }}
+          path: shape_lfo.o
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach direct .o download to GitHub Release (version tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: shape_lfo.o
+          generate_release_notes: true
