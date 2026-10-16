@@ -1,3 +1,5 @@
+// Variant build: 4-segment zoom window. Upload as shape_lfo.cpp to build it.
+#define SLFO_ZOOM_WINDOW 4
 // Shape LFO v0.12.0 scale quantizer, 32 segments, duplicate/delete, zoomed view, pattern bank + preset saving, gate output, play modes, external clock for Expert Sleepers disting NT
 // Copyright (c) 2026. MIT license.
 // A deliberately small, hardware-oriented shape sequence prototype.
