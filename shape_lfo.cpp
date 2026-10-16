@@ -1,4 +1,4 @@
-// Shape LFO v0.7.0 external CV/MIDI clock, reset and transport for Expert Sleepers disting NT
+// Shape LFO v0.8.0 play modes (Loop, One-shot, Step advance, Ping-pong), external clock for Expert Sleepers disting NT
 // Copyright (c) 2026. MIT license.
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -47,22 +47,28 @@ enum ClockSource { kClockInternal=0, kClockCv=1, kClockMidi=2 };
 static char const* const kClockRates[] = {"1 (1/4)", "2 (1/8)", "4 (1/16)", "8 (1/32)", "12", "24", "48"};
 static constexpr int kClockUnitsPerPulse[] = {96,48,24,12,8,4,2};
 static constexpr int kMidiUnitsPerPulse = 4; // MIDI clock = 24 PPQN
+static char const* const kPlayModes[] = {"Loop", "One-shot", "Step advance", "Ping-pong"};
+enum PlayMode { kPlayLoop=0, kPlayOneShot=1, kPlayStep=2, kPlayPingPong=3, kPlayUnset=255 };
 
 
 // The NT sees one shared editor, not 16 copies of every segment.
 // The segment bank is stored inside each algorithm instance.
 enum SharedParameter {
- pSegments=0,pSelected,pBpm,pRange,pAmplitude,pOffset,pOutput,pOutputMode,
+ // v0.7.1: Edit segment is parameter 0 so the NT selects it when the
+ // algorithm is added (the NT starts on parameter 0, not the first page).
+ pSelected=0,pSegments,pBpm,pRange,pAmplitude,pOffset,pOutput,pOutputMode,
  pTest,pBaseDivision,pSlew,pWarp,pSquish,
  pShape,pRepeats,pRelDuration,pFixedDuration,pTiming,pCurve,pPinch,pHeight,
  pDepth,pWidth,pSteps,pContour,pEditCount,pReset,
  pRandomRefresh,pRegenerateSegment,pRegenerateAll,pRegenerateIn,pRandomSteps,
  // v0.7.0: appended only, so all earlier parameter IDs are unchanged.
- pClockSource,pClockIn,pClockRate,pResetIn,pCount
+ pClockSource,pClockIn,pClockRate,pResetIn,
+ // v0.8.0: appended.
+ pPlayMode,pTriggerIn,pCount
 };
 static const _NT_parameter kSharedDefaults[pCount]={
- {"Segments",1,16,4,kNT_unitNone,0,nullptr},
  {"Edit segment",1,16,1,kNT_unitNone,0,nullptr},
+ {"Segments",1,16,4,kNT_unitNone,0,nullptr},
  {"Internal BPM",20,300,120,kNT_unitBPM,0,nullptr},
  {"Voltage",0,2,0,kNT_unitEnum,0,kRanges},
  {"Amplitude",0,100,100,kNT_unitPercent,0,nullptr},
@@ -96,7 +102,9 @@ static const _NT_parameter kSharedDefaults[pCount]={
  {"Clock source",0,2,kClockInternal,kNT_unitEnum,0,kClockSources},
  {"Clock in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr},
  {"Clock PPQN",0,6,2,kNT_unitEnum,0,kClockRates},
- {"Reset in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr}
+ {"Reset in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr},
+ {"Play mode",0,3,kPlayLoop,kNT_unitEnum,0,kPlayModes},
+ {"Trigger in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr}
 };
 // Edit is the first page so the NT opens on "Edit segment" when loaded.
 enum PageIndex { kPageEdit=0,kPageMain,kPageClock,kPageOutput,kPageSequence,kPageRandom,kPageCount };
@@ -110,7 +118,7 @@ struct ShapeLFO : public _NT_algorithm {
  _NT_parameterPage pages[kPageCount];
  _NT_parameterPages pageSet;
  uint8_t editParams[16];
- uint8_t sequenceParams[1];
+ uint8_t sequenceParams[3];
  uint8_t randomParams[2];
  uint8_t clockParams[4];
  int16_t countRequest;
@@ -147,6 +155,12 @@ struct ShapeLFO : public _NT_algorithm {
  // MIDI realtime bytes are only recorded here, then handled by step().
  uint32_t midiClocksPending;
  uint32_t midiTransport;  // 0 none, 1 start, 2 continue, 3 stop (last wins)
+ // Play mode state (audio thread). `holding` parks the playhead at the end
+ // of a pass (One-shot) or segment (Step advance) until the next trigger.
+ // `reverse` is the backward half of Ping-pong: the same segments in
+ // reverse order, each played backwards in time (an exact mirror).
+ uint8_t activePlayMode;
+ bool holding,reverse,triggerGateHigh;
  ShapeLFO():countRequest(-1),syncCount(false),updatingCount(false),resetPending(false),
   syncingEditor(false),pendingEditorSync(false),resetRegenSegmentPending(false),
   resetRegenAllPending(false),regenerateGateHigh(false),pendingRandomRegeneration(0),
@@ -154,7 +168,8 @@ struct ShapeLFO : public _NT_algorithm {
   previewPhase(0),testSamples(0),slewPrevious(0),slewStarted(false),rngState(0x9e3779b9u),
   clockBudget(0),extIncrement(0),extPeriod(0),samplesSincePulse(0),longIntervals(0),
   activeClockSource(kClockInternal),havePulse(false),clockGateHigh(false),resetGateHigh(false),
-  transportRunning(true),midiClocksPending(0),midiTransport(0){
+  transportRunning(true),midiClocksPending(0),midiTransport(0),
+  activePlayMode(kPlayUnset),holding(false),reverse(false),triggerGateHigh(false){
   for(int i=0;i<kMaxSegments;++i){
    segments[i]=defaultSegment();
    skipFreeAtNextEntry[i]=false;
@@ -169,7 +184,7 @@ struct ShapeLFO : public _NT_algorithm {
   parameters=kSharedDefaults;v=nullptr;vIncludingCommon=nullptr;
   static const uint8_t mainParams[]={pBpm,pBaseDivision,pRange,pAmplitude,pOffset};
   static const uint8_t outputParams[]={pOutput,pOutputMode,pSlew,pTest};
-  sequenceParams[0]=pSegments;
+  sequenceParams[0]=pSegments;sequenceParams[1]=pPlayMode;sequenceParams[2]=pTriggerIn;
   randomParams[0]=pRegenerateAll;randomParams[1]=pRegenerateIn;
   clockParams[0]=pClockSource;clockParams[1]=pClockIn;
   clockParams[2]=pClockRate;clockParams[3]=pResetIn;
@@ -182,7 +197,7 @@ struct ShapeLFO : public _NT_algorithm {
   pages[kPageMain]={"Main",5,0,{0,0},mainParams};
   pages[kPageClock]={"Clock",4,0,{0,0},clockParams};
   pages[kPageOutput]={"Output",4,0,{0,0},outputParams};
-  pages[kPageSequence]={"Sequence",1,0,{0,0},sequenceParams};
+  pages[kPageSequence]={"Sequence",3,0,{0,0},sequenceParams};
   pages[kPageRandom]={"Random",2,0,{0,0},randomParams};
   pageSet={kPageCount,pages};parameterPages=&pageSet;
  }
@@ -217,7 +232,8 @@ static void updateEditPage(ShapeLFO* s,bool informHost){
  // Random controls sit directly under Shape: Refresh, Regenerate, steps.
  if(g.shape==kRandom || g.shape==kSmoothRandom){
   s->editParams[next++]=pRandomRefresh;
-  s->editParams[next++]=pRegenerateSegment;
+  // Free already rerolls on every entry; Regenerate only matters in Loop.
+  if(g.randomRefresh)s->editParams[next++]=pRegenerateSegment;
   s->editParams[next++]=pRandomSteps;
  }
  s->editParams[next++]=g.timing?pFixedDuration:pRelDuration;
@@ -292,7 +308,10 @@ static void parameterChanged(_NT_algorithm* alg,int param){
   if(s->currentSegment>=count(s)){s->currentSegment=0;s->segmentTicks=0;s->lastThreshold=0;}return;}
  if(param==pSelected){s->pendingEditorSync=true;return;}
  if(param==pWarp || param==pSquish || param==pRandomRefresh || param==pRandomSteps){
-  if(!s->syncingEditor)pullEditorValue(s,param);
+  if(!s->syncingEditor){
+   pullEditorValue(s,param);
+   if(param==pRandomRefresh)updateEditPage(s,true); // show/hide Regenerate
+  }
  }
  if(param>=pShape && param<=pContour){
   if(s->syncingEditor)return;
@@ -604,19 +623,52 @@ struct Playhead { uint32_t ticks; int slot; uint32_t threshold; float invThresho
 // Move forward, possibly across several segments: an external clock
 // catch-up can be longer than a short segment. With the internal clock
 // this is exactly the v0.6.1 arithmetic (at most one boundary per sample).
+static inline void parkPlayhead(ShapeLFO* s,Playhead& p) {
+    p.ticks=p.threshold-1; // hold the final value of this segment
+    s->holding=true;
+}
 static inline void advancePlayhead(ShapeLFO* s,Playhead& p,uint32_t amount,uint32_t sampleRate) {
+    if(s->holding)return;
     p.ticks+=amount;
     while(p.ticks>=p.threshold) {
-        // Exact residual clock ticks preserve beat alignment at boundaries.
-        p.ticks-=p.threshold;
-        ++p.slot;
-        if(p.slot>=count(s)) {
-            p.slot=0;
-            // Manual/CV regeneration is applied only at a pattern start:
-            // here, or on an external reset (also a pattern start).
-            applyQueuedRandom(s);
+        const int mode=s->activePlayMode;
+        // Step advance: each segment plays once, then waits for a trigger.
+        if(mode==kPlayStep){parkPlayhead(s,p);return;}
+        if(s->reverse) {
+            // Ping-pong backward pass: segments in reverse order.
+            p.ticks-=p.threshold;
+            if(p.slot<=0) {
+                // Back at the start: a new ping-pong cycle (pattern boundary).
+                // Segment 1 now plays forwards again (the mirror point).
+                p.slot=0;s->reverse=false;
+                applyQueuedRandom(s);
+                enterSegment(s,0);
+            } else {
+                --p.slot;
+                enterSegment(s,p.slot);
+            }
+        } else if(p.slot+1>=count(s)) {
+            // End of a forward pass.
+            if(mode==kPlayOneShot){parkPlayhead(s,p);return;}
+            p.ticks-=p.threshold;
+            if(mode==kPlayPingPong) {
+                // Turn around: the last segment continues backwards with the
+                // same values (no re-entry), so the mirror is exact.
+                s->reverse=true;
+            } else {
+                // Loop: exactly the v0.6.1 wrap.
+                p.slot=0;
+                // Manual/CV regeneration is applied only at a pattern start:
+                // here, or on a reset/trigger restart (also a pattern start).
+                applyQueuedRandom(s);
+                enterSegment(s,p.slot);
+            }
+        } else {
+            // Exact residual clock ticks preserve beat alignment at boundaries.
+            p.ticks-=p.threshold;
+            ++p.slot;
+            enterSegment(s,p.slot);
         }
-        enterSegment(s,p.slot);
         p.threshold=thresholdFor(s,p.slot,sampleRate);
         p.invThreshold=1.0f/static_cast<float>(p.threshold);
     }
@@ -624,6 +676,7 @@ static inline void advancePlayhead(ShapeLFO* s,Playhead& p,uint32_t amount,uint3
 // Reset returns to the start of segment 1 immediately. That is a whole-
 // pattern boundary, so queued regeneration and Free refresh apply there.
 static void resetPlayhead(ShapeLFO* s,Playhead& p,uint32_t sampleRate) {
+    s->holding=false;s->reverse=false;
     if(p.slot!=0 || p.ticks!=0) {
         p.slot=0;p.ticks=0;
         applyQueuedRandom(s);
@@ -639,7 +692,7 @@ static void resetPlayhead(ShapeLFO* s,Playhead& p,uint32_t sampleRate) {
 static void clockPulse(ShapeLFO* s,Playhead& p,uint32_t interval,uint32_t pulseTicks,
                        float smoothing,uint32_t sampleRate) {
     if(s->transportRunning) {
-        if(s->clockBudget)advancePlayhead(s,p,s->clockBudget,sampleRate);
+        if(s->clockBudget && !s->holding)advancePlayhead(s,p,s->clockBudget,sampleRate);
         s->clockBudget=pulseTicks;
     }
     if(s->havePulse && interval>0) {
@@ -659,6 +712,39 @@ static void clockPulse(ShapeLFO* s,Playhead& p,uint32_t interval,uint32_t pulseT
     if(s->extPeriod>0.0f) {
         const float inc=static_cast<float>(pulseTicks)/s->extPeriod;
         s->extIncrement=inc<1.0f?1u:static_cast<uint32_t>(inc+0.5f);
+    }
+}
+// Trigger in (One-shot and Step advance). Starts immediately, not on the
+// next clock. With an external clock, the first span is the time left
+// until the next expected pulse, so the shot follows the clock tempo
+// from the trigger point without a jump when that pulse arrives.
+static void triggerPlayhead(ShapeLFO* s,Playhead& p,uint32_t sampleRate,
+                            bool external,uint32_t pulseTicks) {
+    const int mode=s->activePlayMode;
+    if(mode==kPlayOneShot) {
+        // Always retriggers: restart from segment 1, even mid-pass.
+        if(p.slot==0 && p.ticks==0 && !s->holding)return; // same-sample duplicate
+        resetPlayhead(s,p,sampleRate);
+    } else if(mode==kPlayStep) {
+        s->holding=false;s->reverse=false;
+        ++p.slot;
+        if(p.slot>=count(s)) {
+            p.slot=0;
+            applyQueuedRandom(s); // pattern boundary
+        }
+        p.ticks=0;
+        enterSegment(s,p.slot);
+        p.threshold=thresholdFor(s,p.slot,sampleRate);
+        p.invThreshold=1.0f/static_cast<float>(p.threshold);
+    } else return;
+    if(external) {
+        uint32_t budget=pulseTicks;
+        if(s->havePulse && s->extPeriod>0.0f) {
+            float f=static_cast<float>(s->samplesSincePulse)/s->extPeriod;
+            f=clampf(f,0.0f,1.0f);
+            budget=static_cast<uint32_t>((1.0f-f)*static_cast<float>(pulseTicks));
+        }
+        s->clockBudget=budget;
     }
 }
 static int clockUnitsPerPulse(const ShapeLFO* s,int source) {
@@ -724,6 +810,23 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
         s->clockBudget=0;s->havePulse=false;s->extPeriod=0.0f;s->longIntervals=0;
         s->clockGateHigh=false;s->transportRunning=true;
     }
+    // ---- Play mode. Switching while running finishes the current pass
+    // (One-shot) or segment (Step advance) before holding. When the plugin
+    // is first loaded in One-shot/Step advance it waits for a trigger.
+    int mode=s->v[pPlayMode];
+    mode=(mode<kPlayLoop||mode>kPlayPingPong)?kPlayLoop:mode;
+    if(mode!=s->activePlayMode) {
+        const bool firstBlock=s->activePlayMode==kPlayUnset;
+        s->activePlayMode=static_cast<uint8_t>(mode);
+        if(mode!=kPlayPingPong)s->reverse=false;
+        if(mode==kPlayLoop || mode==kPlayPingPong)s->holding=false;
+        if(firstBlock && (mode==kPlayOneShot || mode==kPlayStep)) {
+            p.slot=count(s)-1;
+            p.threshold=thresholdFor(s,p.slot,sampleRate);
+            p.invThreshold=1.0f/static_cast<float>(p.threshold);
+            parkPlayhead(s,p);
+        }
+    }
     const bool external=source!=kClockInternal;
     const uint32_t pulseTicks=5u*sampleRate*static_cast<uint32_t>(clockUnitsPerPulse(s,source));
     const uint32_t midiTransport=__atomic_exchange_n(&s->midiTransport,0u,__ATOMIC_RELAXED);
@@ -754,13 +857,20 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     const float cvSmoothing=clockUnitsPerPulse(s,source)>=12?1.0f:0.5f;
     const uint32_t resetWindow=sampleRate/500; // 2 ms: clock just before reset
     bool clockHigh=s->clockGateHigh,resetHigh=s->resetGateHigh;
+    const int triggerBus=s->v[pTriggerIn];
+    const float* triggerIn=((mode==kPlayOneShot || mode==kPlayStep) && triggerBus>0 && triggerBus<=kNT_lastBus)
+        ? buses+(triggerBus-1)*frames:nullptr;
+    bool triggerHigh=s->triggerGateHigh;
     // Per-sample playhead lives in registers; `p` is synced only on rare
     // events (edges, segment boundaries), keeping the v0.6.1 loop cost.
     uint32_t ticks=p.ticks,threshold=p.threshold;
     int slot=p.slot;
     float invThreshold=p.invThreshold;
+    // holding/reverse only change inside the event helpers below.
+    bool holding=s->holding,reverse=s->reverse;
 #define SLFO_TO_P() do{p.ticks=ticks;p.slot=slot;p.threshold=threshold;p.invThreshold=invThreshold;}while(0)
-#define SLFO_FROM_P() do{ticks=p.ticks;slot=p.slot;threshold=p.threshold;invThreshold=p.invThreshold;}while(0)
+#define SLFO_FROM_P() do{ticks=p.ticks;slot=p.slot;threshold=p.threshold;invThreshold=p.invThreshold;\
+    holding=s->holding;reverse=s->reverse;}while(0)
     uint32_t testSamples=s->testSamples;
     const uint32_t halfTestCycle=sampleRate/4;
     const int slewChoice=s->v[pSlew];
@@ -809,6 +919,17 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
                 SLFO_FROM_P();
             } else if(clockHigh && v<=0.5f)clockHigh=false;
         } else clockHigh=false;
+        // Trigger after clock: a clock pulse in the same sample first
+        // completes the old pass, then the trigger restarts/advances.
+        if(triggerIn) {
+            const float v=triggerIn[i];
+            if(!triggerHigh && v>=1.0f) {
+                triggerHigh=true;
+                SLFO_TO_P();
+                triggerPlayhead(s,p,sampleRate,external,pulseTicks);
+                SLFO_FROM_P();
+            } else if(triggerHigh && v<=0.5f)triggerHigh=false;
+        } else triggerHigh=false;
         float wave;
         float envelope=1.0f;
         if(s->v[pTest]) {
@@ -816,7 +937,11 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
             ++testSamples;
             if(testSamples>=halfTestCycle*2)testSamples=0;
         } else {
-            const float fractional=static_cast<float>(ticks)*invThreshold;
+            float fractional=static_cast<float>(ticks)*invThreshold;
+            if(reverse)fractional=1.0f-fractional; // Ping-pong backward pass
+            // Never reach 1.0: the repeat wrap would turn it back into 0.0
+            // (a held One-shot end or a reversed segment start).
+            if(fractional>0.999999f)fractional=0.999999f;
             envelope=amplitudeAt(s,slot,fractional);
             wave=shapedAt(s,slot,fractional,envelope);
         }
@@ -828,9 +953,9 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
             volts=previous;
         } else {previous=volts;started=true;}
         if(out) {if(replace)out[i]=volts;else out[i]+=volts;}
-        uint32_t amount=clockIncrement;
+        uint32_t amount=holding?0u:clockIncrement;
         if(external) {
-            if(!s->transportRunning)amount=0;
+            if(!s->transportRunning || holding)amount=0;
             else {
                 amount=s->extIncrement<s->clockBudget?s->extIncrement:s->clockBudget;
                 s->clockBudget-=amount;
@@ -846,13 +971,15 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     s->regenerateGateHigh=gateHigh;
     s->clockGateHigh=clockHigh;
     s->resetGateHigh=resetHigh;
+    s->triggerGateHigh=triggerHigh;
     s->segmentTicks=p.ticks;
     s->lastThreshold=p.threshold;
     s->currentSegment=static_cast<uint8_t>(p.slot);
     const int total=totalUnits(s);
     int elapsed=0;
     for(int i=0;i<p.slot;++i)elapsed+=durationUnits(s,i);
-    const float inSegment=static_cast<float>(p.ticks)/static_cast<float>(p.threshold);
+    float inSegment=static_cast<float>(p.ticks)/static_cast<float>(p.threshold);
+    if(s->reverse)inSegment=1.0f-inSegment;
     s->previewPhase=(elapsed+inSegment*durationUnits(s,p.slot))/static_cast<float>(total);
     s->testSamples=testSamples;
     s->slewPrevious=previous;
@@ -912,6 +1039,10 @@ static bool draw(_NT_algorithm* alg) {
     NT_drawText(3,58,left,11,kNT_textLeft,kNT_textTiny);
     char right[32];
     char* r=right;
+    const int playMode=s->v[pPlayMode];
+    if(playMode==kPlayOneShot)appendText(r,"1SHOT ");
+    else if(playMode==kPlayStep)appendText(r,"STEP ");
+    else if(playMode==kPlayPingPong)appendText(r,"PING ");
     *r++='S';appendInt(r,choice+1);
     *r++=' ';*r++='x';appendInt(r,repeatsAt(s,choice));
     *r++=' ';appendText(r,modeAt(s,choice)?"FIX":"REL");*r=0;
@@ -985,7 +1116,7 @@ static int parameterString(_NT_algorithm*,int param,int value,char* buffer){
  *p=0;return static_cast<int>(p-buffer);
 }
 static const _NT_factory kFactory={
- NT_MULTICHAR('S','L','F','2'),"Shape LFO","Shape LFO v0.7.0",
+ NT_MULTICHAR('S','L','F','2'),"Shape LFO","Shape LFO v0.8.0",
  0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
  draw,midiRealtime,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
  nullptr,nullptr,nullptr,nullptr,parameterString,nullptr
