@@ -1,4 +1,4 @@
-// Shape LFO v0.5.1 performance/editor patch for Expert Sleepers disting NT
+// Shape LFO v0.6.1 musical random loop / queued regeneration for Expert Sleepers disting NT
 // Copyright (c) 2026. MIT license.
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -13,22 +13,27 @@ namespace {
 constexpr int kMaxSegments = 16;
 
 enum Shape { kRampDown=0, kRampUp=1, kSine=2, kSquare=3, kHigh=4, kLow=5,
-             kTriangle=6, kSteps=7 };
+             kTriangle=6, kSteps=7, kRandom=8, kSmoothRandom=9 };
 // Append new shapes only; existing saved shape selections keep their IDs.
 static char const* const kShapes[] = {"Ramp down", "Ramp up", "Sine", "Square", "High", "Low",
-                                       "Triangle", "Steps"};
+                                       "Triangle", "Steps", "Random", "Smooth random"};
 static char const* const kStepContours[] = {"Up", "Down", "Hump", "Valley"};
+static char const* const kRandomRefresh[] = {"Free", "Loop"};
 static char const* const kRanges[] = {"-5 to +5V", "0 to 5V", "0 to 10V"};
 static char const* const kTestModes[] = {"Off", "2 Hz square"};
-static char const* const kBaseDivisions[] = {"1/32", "1/16", "1/8", "1/4", "1/2", "1 bar"};
+// Triplets appear beside their matching straight divisions for fast editing.
+// As requested, this build does not migrate saved settings from earlier builds.
+static char const* const kBaseDivisions[] = {"1/32", "1/32T", "1/16", "1/16T", "1/8", "1/8T", "1/4", "1/4T", "1/2", "1/2T", "1 bar", "1 bar T"};
 static char const* const kModes[] = {"Follow base", "Fixed note"};
 static char const* const kRelativeDurations[] = {"x1/4", "x1/2", "x1", "x2", "x4", "x8"};
-static char const* const kFixedDurations[] = {"1/32", "1/16", "1/8", "1/4", "1/2", "1 bar", "2 bars", "4 bars"};
+static char const* const kFixedDurations[] = {"1/32", "1/32T", "1/16", "1/16T", "1/8", "1/8T", "1/4", "1/4T", "1/2", "1/2T", "1 bar", "1 bar T", "2 bars", "2 bars T", "4 bars", "4 bars T"};
 static char const* const kSlewTimes[] = {"Off", "1 ms", "2 ms", "5 ms", "10 ms", "20 ms",
     "40 ms", "80 ms", "160 ms", "320 ms", "640 ms", "1000 ms"};
-static constexpr int kBaseUnits[] = {4,8,16,32,64,128};   // 1/128 bar per unit
+// All timing uses integer 1/384-bar units: straight and triplet lengths
+// have exact representations. 1 quarter = 96 units, quarter triplet = 64.
+static constexpr int kBaseUnits[] = {12,8,24,16,48,32,96,64,192,128,384,256};
 static constexpr int kRelativeFactors[] = {1,2,4,8,16,32}; // /4: 1/4..8
-static constexpr int kFixedUnits[] = {4,8,16,32,64,128,256,512};
+static constexpr int kFixedUnits[] = {12,8,24,16,48,32,96,64,192,128,384,256,768,512,1536,1024};
 static constexpr int kSlewMilliseconds[] = {0,1,2,5,10,20,40,80,160,320,640,1000};
 static char const* const kAmpAnchors[] = {"Centered", "From zero"};
 // The signed Pinch Height control is +100=top, 0=center, -100=bottom.
@@ -38,14 +43,14 @@ static char const* const kAmpAnchors[] = {"Centered", "From zero"};
 static constexpr int kSlewCount=sizeof(kSlewMilliseconds)/sizeof(kSlewMilliseconds[0]);
 
 
-// v0.5: the NT sees one shared editor, not 16 copies of every segment.
+// The NT sees one shared editor, not 16 copies of every segment.
 // The segment bank is stored inside each algorithm instance.
-// This build validates the architecture. See README for persistence status.
 enum SharedParameter {
  pSegments=0,pSelected,pBpm,pRange,pAmplitude,pOffset,pOutput,pOutputMode,
  pTest,pBaseDivision,pSlew,pWarp,pSquish,
  pShape,pRepeats,pRelDuration,pFixedDuration,pTiming,pCurve,pPinch,pHeight,
- pDepth,pWidth,pSteps,pContour,pEditCount,pReset,pCount
+ pDepth,pWidth,pSteps,pContour,pEditCount,pReset,
+ pRandomRefresh,pRegenerateSegment,pRegenerateAll,pRegenerateIn,pRandomSteps,pCount
 };
 static const _NT_parameter kSharedDefaults[pCount]={
  {"Segments",1,16,4,kNT_unitNone,0,nullptr},
@@ -57,14 +62,14 @@ static const _NT_parameter kSharedDefaults[pCount]={
  {"CV out",1,kNT_lastBus,13,kNT_unitCvOutput,0,nullptr},
  {"Output mode",0,1,1,kNT_unitOutputMode,0,nullptr},
  {"Test oscillator",0,1,0,kNT_unitEnum,0,kTestModes},
- {"Base division",0,5,3,kNT_unitEnum,0,kBaseDivisions},
+ {"Base division",0,11,6,kNT_unitEnum,0,kBaseDivisions},
  {"Output slew",0,kSlewCount-1,0,kNT_unitEnum,0,kSlewTimes},
  {"Warp",-45,45,0,kNT_unitNone,0,nullptr},
  {"Squish",-100,100,0,kNT_unitPercent,0,nullptr},
- {"Shape",0,7,kRampDown,kNT_unitEnum,0,kShapes},
+ {"Shape",0,9,kRampDown,kNT_unitEnum,0,kShapes},
  {"Repeats",1,8,1,kNT_unitNone,0,nullptr},
  {"Duration",0,5,2,kNT_unitEnum,0,kRelativeDurations},
- {"Duration",0,7,2,kNT_unitEnum,0,kFixedDurations},
+ {"Duration",0,15,4,kNT_unitEnum,0,kFixedDurations},
  {"Timing",0,1,0,kNT_unitEnum,0,kModes},
  {"Curve",-100,100,0,kNT_unitNone,0,nullptr},
  {"Pinch",0,100,50,kNT_unitHasStrings,0,nullptr},
@@ -74,49 +79,76 @@ static const _NT_parameter kSharedDefaults[pCount]={
  {"Steps",2,16,8,kNT_unitNone,0,nullptr},
  {"Contour",0,3,0,kNT_unitEnum,0,kStepContours},
  {"Add/Remove",1,16,4,kNT_unitNone,0,nullptr},
- {"Reset segment",0,1,0,kNT_unitConfirm,0,nullptr}
+ {"Reset segment",0,1,0,kNT_unitConfirm,0,nullptr},
+ {"Refresh",0,1,0,kNT_unitEnum,0,kRandomRefresh},
+ {"Regenerate segment",0,1,0,kNT_unitConfirm,0,nullptr},
+ {"Regenerate all",0,1,0,kNT_unitConfirm,0,nullptr},
+ {"Regen trigger in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr},
+ {"Random steps",1,16,1,kNT_unitNone,0,nullptr}
 };
 struct Segment {
- uint8_t shape,repeats,timing,relative,fixed,pinch,depth,width,steps,contour;
- int8_t curve,height;
+ uint8_t shape,repeats,timing,relative,fixed,pinch,depth,width,steps,contour,randomRefresh,randomSteps;
+ int8_t curve,height,warp,squish;
 };
-static Segment defaultSegment(){return {kRampDown,1,0,2,2,50,100,50,8,0,0,0};}
+static Segment defaultSegment(){return {kRampDown,1,0,2,4,50,100,50,8,0,0,1,0,0,0,0};}
 struct ShapeLFO : public _NT_algorithm {
  Segment segments[kMaxSegments];
  _NT_parameterPage pages[5];
  _NT_parameterPages pageSet;
- uint8_t editParams[15];
+ uint8_t editParams[16];
  uint8_t sequenceParams[1];
+ uint8_t randomParams[2];
  int16_t countRequest;
  bool syncCount,updatingCount,resetPending,syncingEditor,pendingEditorSync;
+ bool resetRegenSegmentPending,resetRegenAllPending;
+ bool skipFreeAtNextEntry[kMaxSegments];
+ bool regenerateGateHigh;
+ // Bit 0..15: regenerate that segment. Bit 16: regenerate all active
+ // random segments. Producers run in UI/audio contexts, consumed on
+ // the NEXT whole-chain wrap only. Repeated requests coalesce.
+ uint32_t pendingRandomRegeneration;
  uint32_t segmentTicks,lastThreshold;
  uint8_t currentSegment;
  float previewPhase;
  uint32_t testSamples;
  float slewPrevious;
  bool slewStarted;
+ // Random tables contain one voltage per step plus the next interpolation
+ // endpoint. Free updates on segment entry; Loop keeps the last values.
+ // Manual/CV requests are deferred to whole-pattern boundaries.
+ float randomValues[kMaxSegments][17];
+ uint32_t rngState;
  ShapeLFO():countRequest(-1),syncCount(false),updatingCount(false),resetPending(false),
-  syncingEditor(false),pendingEditorSync(false),segmentTicks(0),lastThreshold(0),currentSegment(0),
-  previewPhase(0),testSamples(0),slewPrevious(0),slewStarted(false){
-  for(int i=0;i<kMaxSegments;++i)segments[i]=defaultSegment();
+  syncingEditor(false),pendingEditorSync(false),resetRegenSegmentPending(false),
+  resetRegenAllPending(false),regenerateGateHigh(false),pendingRandomRegeneration(0),
+  segmentTicks(0),lastThreshold(0),currentSegment(0),
+  previewPhase(0),testSamples(0),slewPrevious(0),slewStarted(false),rngState(0x9e3779b9u){
+  for(int i=0;i<kMaxSegments;++i){
+   segments[i]=defaultSegment();
+   skipFreeAtNextEntry[i]=false;
+   for(int j=0;j<17;++j){
+    rngState^=rngState<<13;rngState^=rngState>>17;rngState^=rngState<<5;
+    randomValues[i][j]=(static_cast<float>(rngState&65535u)/32767.5f)-1.0f;
+   }
+  }
   segments[1].repeats=4;
   segments[2].shape=kSine;
   segments[3].shape=kRampUp;
   parameters=kSharedDefaults;v=nullptr;vIncludingCommon=nullptr;
   static const uint8_t mainParams[]={pBpm,pBaseDivision,pRange,pAmplitude,pOffset};
   static const uint8_t outputParams[]={pOutput,pOutputMode,pSlew,pTest};
-  static const uint8_t shapeFxParams[]={pWarp,pSquish};
   sequenceParams[0]=pSegments;
+  randomParams[0]=pRegenerateAll;randomParams[1]=pRegenerateIn;
   // Populate the Edit page before the NT's very first UI draw. No
   // callback can rely on v[] until the host has attached its values.
   const uint8_t initialEdit[]={pSelected,pShape,pRelDuration,pRepeats,pCurve,
-      pPinch,pHeight,pDepth,pTiming,pReset,pEditCount};
-  for(int i=0;i<11;++i)editParams[i]=initialEdit[i];
+      pPinch,pHeight,pDepth,pWarp,pSquish,pTiming,pReset,pEditCount};
+  for(int i=0;i<13;++i)editParams[i]=initialEdit[i];
   pages[0]={"Main",5,0,{0,0},mainParams};
-  pages[1]={"Edit",11,0,{0,0},editParams};
+  pages[1]={"Edit",13,0,{0,0},editParams};
   pages[2]={"Output",4,0,{0,0},outputParams};
   pages[3]={"Sequence",1,0,{0,0},sequenceParams};
-  pages[4]={"Shape FX",2,0,{0,0},shapeFxParams};
+  pages[4]={"Random",2,0,{0,0},randomParams};
   pageSet={5,pages};parameterPages=&pageSet;
  }
 };
@@ -131,8 +163,8 @@ static int repeatsAt(const ShapeLFO* s,int i){const int v=s->segments[i].repeats
 static int modeAt(const ShapeLFO* s,int i){return s->segments[i].timing?1:0;}
 static int durationUnits(const ShapeLFO* s,int i){
  const Segment& g=s->segments[i];
- if(g.timing)return kFixedUnits[g.fixed<=7?g.fixed:7];
- int base=s->v[pBaseDivision];base=base<0?0:(base>5?5:base);
+ if(g.timing)return kFixedUnits[g.fixed<=15?g.fixed:15];
+ int base=s->v[pBaseDivision];base=base<0?0:(base>11?11:base);
  const int rel=g.relative<=5?g.relative:5;
  return (kBaseUnits[base]*kRelativeFactors[rel])/4;
 }
@@ -153,7 +185,13 @@ static void updateEditPage(ShapeLFO* s,bool informHost){
  else if(g.shape==kSteps){
   s->editParams[next++]=pSteps;s->editParams[next++]=pContour;s->editParams[next++]=pCurve;
  }else if(g.shape==kRampDown || g.shape==kRampUp)s->editParams[next++]=pCurve;
+ if(g.shape==kRandom || g.shape==kSmoothRandom){
+  s->editParams[next++]=pRandomSteps;
+  s->editParams[next++]=pRandomRefresh;
+  s->editParams[next++]=pRegenerateSegment;
+ }
  s->editParams[next++]=pPinch;s->editParams[next++]=pHeight;s->editParams[next++]=pDepth;
+ s->editParams[next++]=pWarp;s->editParams[next++]=pSquish;
  s->editParams[next++]=pTiming;s->editParams[next++]=pReset;s->editParams[next++]=pEditCount;
  s->pages[1].numParams=static_cast<uint8_t>(next);
  if(informHost){int index=NT_algorithmIndex(s);if(index>=0)NT_updateParameterPages(static_cast<uint32_t>(index));}
@@ -167,6 +205,9 @@ static void pushEditorValues(ShapeLFO* s){
  setHostParam(s,pPinch,g.pinch);setHostParam(s,pHeight,g.height);
  setHostParam(s,pDepth,g.depth);setHostParam(s,pWidth,g.width);
  setHostParam(s,pSteps,g.steps);setHostParam(s,pContour,g.contour);
+ setHostParam(s,pWarp,g.warp);setHostParam(s,pSquish,g.squish);
+ setHostParam(s,pRandomRefresh,g.randomRefresh);
+ setHostParam(s,pRandomSteps,g.randomSteps);
  s->syncingEditor=false;
  updateEditPage(s,true);
 }
@@ -179,6 +220,9 @@ static void pullEditorValue(ShapeLFO* s,int param){
   case pPinch:g.pinch=n;break;case pHeight:g.height=n;break;
   case pDepth:g.depth=n;break;case pWidth:g.width=n;break;
   case pSteps:g.steps=n;break;case pContour:g.contour=n;break;
+  case pWarp:g.warp=n;break;case pSquish:g.squish=n;break;
+  case pRandomRefresh:g.randomRefresh=n;break;
+  case pRandomSteps:g.randomSteps=n;break;
  }
 }
 static void calculateRequirements(_NT_algorithmRequirements& req,const int32_t*){
@@ -191,9 +235,29 @@ static void parameterChanged(_NT_algorithm* alg,int param){
  ShapeLFO* s=static_cast<ShapeLFO*>(alg);
  if(param==pEditCount){if(!s->updatingCount)s->countRequest=s->v[pEditCount];return;}
  if(param==pReset){if(s->v[pReset])s->resetPending=true;return;}
+ if(param==pRegenerateSegment){
+  if(s->v[pRegenerateSegment]){
+   // Capture the selected segment at button press, even if the user
+   // changes selection before the next pattern boundary.
+   __atomic_fetch_or(&s->pendingRandomRegeneration,
+       1u<<selected(s),__ATOMIC_RELAXED);
+   s->resetRegenSegmentPending=true;
+  }
+  return;
+ }
+ if(param==pRegenerateAll){
+  if(s->v[pRegenerateAll]){
+   __atomic_fetch_or(&s->pendingRandomRegeneration,1u<<kMaxSegments,__ATOMIC_RELAXED);
+   s->resetRegenAllPending=true;
+  }
+  return;
+ }
  if(param==pSegments && !s->updatingCount){s->syncCount=true;
   if(s->currentSegment>=count(s)){s->currentSegment=0;s->segmentTicks=0;s->lastThreshold=0;}return;}
  if(param==pSelected){s->pendingEditorSync=true;return;}
+ if(param==pWarp || param==pSquish || param==pRandomRefresh || param==pRandomSteps){
+  if(!s->syncingEditor)pullEditorValue(s,param);
+ }
  if(param>=pShape && param<=pContour){
   if(s->syncingEditor)return;
   pullEditorValue(s,param);
@@ -213,6 +277,12 @@ static void consumeEditRequest(ShapeLFO* s){
   s->updatingCount=false;
  }else if(s->syncCount || s->v[pEditCount]!=count(s)){
   s->syncCount=false;s->updatingCount=true;setHostParam(s,pEditCount,count(s));s->updatingCount=false;
+ }
+ if(s->resetRegenSegmentPending){
+  s->resetRegenSegmentPending=false;setHostParam(s,pRegenerateSegment,0);
+ }
+ if(s->resetRegenAllPending){
+  s->resetRegenAllPending=false;setHostParam(s,pRegenerateAll,0);
  }
  if(s->resetPending){
   s->resetPending=false;
@@ -323,15 +393,27 @@ static inline float curvedStep(float t,int count,int contour,int curve) {
     const float reach=clampf(delta,0.0f,headroom);
     const float arch=level+signedDirection*reach*halfSine(u);
     if(curve<0)return level+(arch-level)*(-curve*0.01f);
-    // At +50 a fully rounded transition. +100 yields an arch followed
-    // by the next stair jump, exactly as in the user's drawn examples.
-    const float round=level+(next-level)*smooth01(u);
+    // At +50, the step rounds toward the next level. Increasing Curve
+    // progressively shortens that transition and raises an independent
+    // positive arch INSIDE each step, regardless of Hump/Valley direction.
+    // At +100 the result is a pure per-step arch, returning to its plateau.
     const float mix=(curve-50)*0.02f;
-    // A positive Curve must never turn into a scoop on a descending
-    // staircase. Keep the rounded transition when it rises, but clamp
-    // downward excursions to the current step plateau.
-    const float curved=round+(arch-round)*mix;
-    return clampf(curved<level?level:curved,-1.0f,1.0f);
+    const float active=1.0f-mix;
+    // The +50 case rounds only the LAST 71.5% of a step. Shrink that
+    // same transition window continuously to zero as the arches grow.
+    // This avoids a discontinuity when the user turns Curve past +50.
+    const float transitionWidth=0.715f*active;
+    float transition=0.0f;
+    if(transitionWidth>0.00001f){
+        const float start=1.0f-transitionWidth;
+        transition=smooth01((u-start)/transitionWidth);
+    }
+    // Descending contours still descend to their next plateau, but the
+    // arch itself is ALWAYS above (positive) or below (negative) its own
+    // step level regardless of Hump/Valley orientation.
+    const float curved=level+(next-level)*transition*active
+                       + (arch-level)*mix;
+    return clampf(curved,-1.0f,1.0f);
 }
 static inline float waveform(int shape,float t,int curve=0,int width=50,
                              int stepCount=8,int contour=0) {
@@ -378,14 +460,65 @@ static inline float anchorAt(const ShapeLFO* s,int slot) {
     // Positive height is UP on the NT: invert the original anchor coordinate.
     return -clampf(static_cast<float>(s->segments[slot].height)*0.01f,-1.0f,1.0f);
 }
+static inline float randomWave(const ShapeLFO* s,int slot,float phase,bool smooth) {
+ const int n=s->segments[slot].randomSteps;
+ const int steps=n<1?1:(n>16?16:n);
+ if(steps==1)return s->randomValues[slot][0];
+ float pos=clampf(phase,0.0f,0.999999f)*static_cast<float>(steps);
+ int i=static_cast<int>(pos);
+ if(i>=steps)i=steps-1;
+ float a=s->randomValues[slot][i];
+ if(!smooth)return a;
+ float f=smooth01(pos-static_cast<float>(i));
+ return a+(s->randomValues[slot][i+1]-a)*f;
+}
+static void regenerateRandom(ShapeLFO* s,int slot){
+ for(int i=0;i<17;++i){
+  uint32_t x=s->rngState;
+  x^=x<<13;x^=x>>17;x^=x<<5;
+  s->rngState=x;
+  s->randomValues[slot][i]=static_cast<float>(x&65535u)/32767.5f-1.0f;
+ }
+}
+static inline bool randomShape(const Segment& seg){
+ return seg.shape==kRandom || seg.shape==kSmoothRandom;
+}
+// Free mode is regenerated at segment entry (a quantized boundary).
+// A pending global/selected regeneration is rendered on the whole-chain
+// boundary and remains intact through that segment's NEXT entry.
+static inline void enterSegment(ShapeLFO* s,int slot){
+ if(!randomShape(s->segments[slot])){
+  s->skipFreeAtNextEntry[slot]=false;return;
+ }
+ if(s->skipFreeAtNextEntry[slot]){
+  s->skipFreeAtNextEntry[slot]=false;return;
+ }
+ if(!s->segments[slot].randomRefresh)regenerateRandom(s,slot);
+}
+static void applyQueuedRandom(ShapeLFO* s){
+ const uint32_t requests=__atomic_exchange_n(
+     &s->pendingRandomRegeneration,0u,__ATOMIC_RELAXED);
+ const bool all=(requests&(1u<<kMaxSegments))!=0u;
+ const int active=count(s);
+ for(int i=0;i<kMaxSegments;++i){
+  if((all && i<active) || (requests&(1u<<i))){
+   if(randomShape(s->segments[i])){
+    regenerateRandom(s,i);
+    s->skipFreeAtNextEntry[i]=true;
+   }
+  }
+ }
+}
 static inline float shapedAt(const ShapeLFO* s,int slot,float inside,float envelope) {
     const Segment& seg=s->segments[slot];
     const int r=seg.repeats<1?1:(seg.repeats>8?8:seg.repeats);
     float p=inside*static_cast<float>(r);
     p-=static_cast<float>(static_cast<int>(p));
-    p=shapedPhase(p,50+s->v[pWarp],s->v[pSquish]);
-    return waveform(seg.shape,p,seg.curve,seg.width,seg.steps,seg.contour)
-         *envelope;
+ p=shapedPhase(p,50+seg.warp,seg.squish);
+ const float value=(seg.shape==kRandom || seg.shape==kSmoothRandom)
+   ?randomWave(s,slot,p,seg.shape==kSmoothRandom)
+   :waveform(seg.shape,p,seg.curve,seg.width,seg.steps,seg.contour);
+ return value*envelope;
 }
 static float scaleOutput(const ShapeLFO* s,float wave,float envelope,int slot) {
     float center=0.0f,radius=5.0f;
@@ -424,7 +557,7 @@ static float evaluateAtUnits(const ShapeLFO* s,float position,int* activeSlot) {
 // Changes to master division or the current segment's duration rescale
 // its stored phase on the next block, rather than restarting the shape.
 static uint32_t thresholdFor(const ShapeLFO* s,int slot,uint32_t sampleRate) {
-    return 15u*sampleRate*static_cast<uint32_t>(durationUnits(s,slot));
+    return 5u*sampleRate*static_cast<uint32_t>(durationUnits(s,slot));
 }
 static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     ShapeLFO* s=static_cast<ShapeLFO*>(alg);
@@ -463,7 +596,21 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     float previous=s->slewPrevious;
     bool started=s->slewStarted;
     const uint32_t clockIncrement=static_cast<uint32_t>(8*bpm);
+    const int gateBus=s->v[pRegenerateIn];
+    const float* gate=(gateBus>0 && gateBus<=kNT_lastBus)
+        ? buses+(gateBus-1)*frames:nullptr;
+    bool gateHigh=s->regenerateGateHigh;
     for(int i=0;i<frames;++i) {
+        // Schmitt-style rising-edge detection: one request per gate,
+        // never regenerate directly from an incoming CV edge.
+        if(gate){
+         const float v=gate[i];
+         if(!gateHigh && v>=1.0f){
+          gateHigh=true;
+          __atomic_fetch_or(&s->pendingRandomRegeneration,
+              1u<<kMaxSegments,__ATOMIC_RELAXED);
+         }else if(gateHigh && v<=0.5f)gateHigh=false;
+        }else gateHigh=false;
         float wave;
         float envelope=1.0f;
         if(s->v[pTest]) {
@@ -487,13 +634,19 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
         if(ticks>=threshold) {
             ticks-=threshold;
             ++slot;
-            if(slot>=count(s))slot=0;
-            uint32_t nextThreshold=thresholdFor(s,slot,sampleRate);
+    if(slot>=count(s)){
+     slot=0;
+     // Every manual/CV regeneration is applied here and nowhere else.
+     applyQueuedRandom(s);
+    }
+    enterSegment(s,slot);
+    uint32_t nextThreshold=thresholdFor(s,slot,sampleRate);
             // Exact residual clock ticks preserve beat alignment at boundaries.
             threshold=nextThreshold;
             invThreshold=1.0f/static_cast<float>(threshold);
         }
     }
+    s->regenerateGateHigh=gateHigh;
     s->segmentTicks=ticks;
     s->lastThreshold=threshold;
     s->currentSegment=static_cast<uint8_t>(slot);
@@ -519,14 +672,14 @@ static void appendInt(char*& dst,int value) {
 static int gcd(int a,int b) {while(b){int c=a%b;a=b;b=c;}return a;}
 static void lengthText(char* dst,int units) {
     char* p=dst;
-    const int bars=units/128;
+    const int bars=units/384;
     appendInt(p,bars);appendText(p,bars==1?" Bar ":" Bars ");
-    const int remainder=units%128;
-    appendInt(p,remainder/32);
-    int fraction=remainder%32;
+    const int remainder=units%384;
+    appendInt(p,remainder/96);
+    int fraction=remainder%96;
     if(fraction) {
-        const int div=gcd(fraction,32);
-        *p++='+';appendInt(p,fraction/div);*p++='/';appendInt(p,32/div);
+        const int div=gcd(fraction,96);
+        *p++='+';appendInt(p,fraction/div);*p++='/';appendInt(p,96/div);
     }
     appendText(p," Beats");*p=0;
 }
@@ -614,11 +767,13 @@ static int parameterString(_NT_algorithm*,int param,int value,char* buffer){
   if(value==0)appendText(p,"Center");
   else {appendText(p,value<0?"Down ":"Up ");appendInt(p,value<0?-value:value);*p++='%';}
  }else if(param==pReset)appendText(p,value==0?"Ready":"Reset selected");
+ else if(param==pRegenerateSegment)appendText(p,value==0?"Ready":"Queue segment");
+ else if(param==pRegenerateAll)appendText(p,value==0?"Ready":"Queue all");
  else return 0;
  *p=0;return static_cast<int>(p-buffer);
 }
 static const _NT_factory kFactory={
- NT_MULTICHAR('S','L','F','2'),"Shape LFO","Shared-editor shape LFO (v0.5.1)",
+ NT_MULTICHAR('S','L','F','2'),"Shape LFO","Shape LFO v0.6.1",
  0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
  draw,nullptr,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
  nullptr,nullptr,nullptr,nullptr,parameterString,nullptr
