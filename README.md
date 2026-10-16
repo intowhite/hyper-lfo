@@ -1,55 +1,46 @@
-# Shape LFO v0.1.2 — timing repair + editor cleanup
+# Shape LFO / Hyper LFO — v0.7.0
 
-This is a **test build for the disting NT**. v0.1.1 loads and displays but was reported to output a static CV and not respond to BPM on the physical hardware. v0.1.2 changes the phase engine and adds a dedicated 2 Hz oscillator diagnostic. The user subsequently confirmed that the locally compiled GNU ARM v0.1.2 is working on the NT. The experimental Clang-compiled binary does not load. See GITHUB_BUILD.md for automated builds.
+A native Expert Sleepers disting NT clocked shape-chain CV generator.
 
-## Changes from v0.1.1
+## Installing / building
 
-- **Timing rewritten** as a bounded, sample-accurate integer tick accumulator (`ticks += BPM`, advance eighth-note segment when `ticks >= 30 * sampleRate`). This removes continuous floating-point/double-phase accumulation and makes BPM changes take effect in the next render block. It is a proposed repair for the static CV; the exact hardware cause is not yet confirmed.
-- **No duplicated editor controls**: `Segments` and `Edit segment` are now on the **Edit** page only. Main contains Internal BPM, Voltage, Amplitude, Offset. Edit contains Segments, Edit segment, the chosen segment's Shape and Repeats. Output contains CV out, Output mode, Test oscillator.
-- **Hardware diagnostic**: on the Output page, set `Test oscillator` to `2 Hz square`. This bypasses sequence playback and alternates positive and negative CV every 250 ms. It uses the same output/voltage settings as the normal engine. Return to `Off` afterward.
-- One additional parameter appended at index 40, preserving all existing indices 0–39. API v13 is unchanged; factory GUID is unchanged.
-- Build scripts now detect an SDK folder either **inside** or **next to** the build folder (or accept `-ApiPath`).
+- For your existing GitHub Actions project: replace `shape_lfo.cpp` with this release's source and build. Upload the `tests/` folder too so the workflow runs the host tests (it skips them if `tests/run.sh` is missing). `sine_lut.inc`, `build.sh` and `.github/workflows/build.yml` are unchanged.
+- Download the **actual ARM GNU `.o`** from your GitHub Actions build, not a desktop/Clang object. Copy it to `/programs/plug-ins/` on the NT SD card and restart.
+- To build locally, run `build.sh path/to/distingNT_API` using `arm-none-eabi-g++` (14.2.Rel1 is the known toolchain). Host tests: `bash tests/run.sh`.
 
-## Windows build
+## Parameter pages
 
-Use the official [distingNT_API](https://github.com/expertsleepersltd/distingNT_API) and the working ARM GNU toolchain from your Clocked Wavetable plugin.
+| Page | Parameters |
+|---|---|
+| **Edit** (opens first) | Edit segment, Shape, [Random: Refresh, Regenerate segment, Random steps], Duration, Repeats, [shape controls], Pinch, Pinch Height, Depth, Warp, Squish, Timing, Reset segment, Add/Remove |
+| Main | Internal BPM, Base division, Voltage, Amplitude, Offset |
+| **Clock** | Clock source, Clock in, Clock PPQN, Reset in |
+| Output | CV out, Output mode, Output slew, Test oscillator |
+| Sequence | Segments |
+| Random | Regenerate all, Regen trigger in |
 
-With `distingNT_API` in the same folder as `build.ps1`, open PowerShell there and run:
+## What's new in v0.7.0
 
-```powershell
-.\build.ps1
-```
+**Editing.** The Edit page is now first, so the NT opens on *Edit segment*. For Random and Smooth Random, *Refresh*, *Regenerate segment* and *Random steps* now follow Shape directly, before Duration and Repeats.
 
-If it is stored elsewhere, run:
+**External clock.** *Clock source* selects Internal (default, unchanged), CV clock or MIDI clock.
 
-```powershell
-.\build.ps1 -ApiPath "C:\path\to\distingNT_API"
-```
+- **CV clock**: assign *Clock in* and set *Clock PPQN* (1, 2, 4, 8, 12, 24 or 48 pulses per quarter; default 4 = 16th notes). Rising edge ≥1.0 V, re-arms below 0.5 V.
+- **MIDI clock**: 24 PPQN from the NT's MIDI input. Start restarts at segment 1 (the next clock is the downbeat), Stop holds, Continue resumes. Clock with no transport messages just runs.
+- **Phase-locked, no drift**: each pulse puts the playhead exactly on its musical grid position. Between pulses it moves at the measured tempo but never runs past the next pulse, so when the clock stops the LFO stops on the beat and waits.
+- **Reset in** (any clock source) jumps to the start of segment 1 immediately. Reset together with a clock (or a clock up to 2 ms before it) makes that clock the downbeat. Reset is a pattern boundary: queued regeneration and Free refresh apply there.
+- Status at the bottom left: `CV 120` / `MIDI 120` (measured BPM), `--` with no clock, `MIDI STOP` after Stop.
 
-Build result: `shape_lfo.o` in the build folder. Copy to `/programs/plug-ins/` on the NT SD card, replacing the previous `shape_lfo.o`; restart/rescan the NT.
+*Internal BPM* is ignored while an external source is running (it is only used as the starting tempo estimate before the second pulse).
 
-Do not install or copy the old `shape_lfo_v0_1.o` file made without the official SDK.
+## Random (from v0.6.1)
 
-## Testing on the Disting NT
+Random and Smooth Random have *Random steps* 1–16 (default 1) and *Refresh* Free (new values on each segment entry) or Loop (keep current values). *Regenerate segment*, *Regenerate all* and *Regen trigger in* (rising edge ≥1.0 V, re-arm ≤0.5 V) are **always quantized** to the next whole-pattern boundary (the pattern wrapping to segment 1, or a Reset). Multiple requests coalesce.
 
-1. Remove/re-add Shape LFO after loading the new plugin if needed. Start with default settings: `CV out` = Output 1 (bus 13), `Output mode` = Replace, `Test oscillator` = Off.
-2. Look at the graph: the vertical **playhead line** should sweep across the pattern repeatedly. The CV output should move with it; at 120 BPM the default four eighth-note segments form a one-second loop.
-3. Set Internal BPM to 60, then 240. The playhead and CV changes should respectively take twice or half the time.
-4. Navigate to Edit, adjust `Edit segment`; the UI should **remain in Edit** and update Shape/Repeats for the chosen segment. `Segments` and `Edit segment` must not appear in Main.
-5. If the CV is still static, go to **Output > Test oscillator > 2 Hz square**. An unmistakable +5V/-5V square wave should appear on the configured CV output. Report (a) whether the playhead moves in normal mode and (b) whether the test oscillator alternates. Those two observations will pinpoint the next fix.
+## Known development limitation
 
-## Current functionality
+The internal segment store does not yet persist custom per-segment values across algorithm reloads; persistence will be handled with pattern saving.
 
-One output; 16 stored segment slots (1–16 active); fixed 1/8-note duration; ramp down, ramp up, sine, square; 1–8 repetitions within each segment; ±5 V / 0–5 V / 0–10 V range; amplitude/offset; internal 20–300 BPM; looping; live graph. There are no pattern banks, chains, envelopes, sophisticated contour editing, or external/MIDI clocks in this version. Those remain in ROADMAP.md.
+## Release validation
 
-## Host tests
-
-On a desktop Unix environment with a C++ compiler:
-
-```sh
-bash tests/run.sh
-```
-
-Tests exercise the waveform engine, sample-accurate eighth-note boundaries, 60-vs-120-BPM response, 2 Hz independent diagnostic mode, dynamic parameter pages, and default CV output.
-
-This package intentionally contains source and build scripts, **not** a precompiled `.o` object: cross-compilation with the known-working GNU ARM toolchain and official SDK is the compatibility-preserving process until an official SDK build can be tested on hardware.
+Host editor/DSP/clock tests, address/undefined sanitizers and ARM GNU 14.2 compilation pass, with no runtime helper imports. With Clock source = Internal, CV output is byte-identical to v0.6.1 over 1.44 M samples. **Behaviour on the physical disting NT is not yet confirmed.** The last hardware-confirmed release is v0.5.1; v0.6.1 was reported working with no real bugs.

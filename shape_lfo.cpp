@@ -1,4 +1,4 @@
-// Shape LFO v0.6.1 musical random loop / queued regeneration for Expert Sleepers disting NT
+// Shape LFO v0.7.0 external CV/MIDI clock, reset and transport for Expert Sleepers disting NT
 // Copyright (c) 2026. MIT license.
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -41,6 +41,12 @@ static char const* const kAmpAnchors[] = {"Centered", "From zero"};
 // Pull values need to be negated to recreate the old sound.
 // On 0..10V: Top=10V, Center=5V, Bottom=0V.
 static constexpr int kSlewCount=sizeof(kSlewMilliseconds)/sizeof(kSlewMilliseconds[0]);
+// External clock. Each pulse is an exact whole number of 1/384-bar units.
+static char const* const kClockSources[] = {"Internal", "CV clock", "MIDI clock"};
+enum ClockSource { kClockInternal=0, kClockCv=1, kClockMidi=2 };
+static char const* const kClockRates[] = {"1 (1/4)", "2 (1/8)", "4 (1/16)", "8 (1/32)", "12", "24", "48"};
+static constexpr int kClockUnitsPerPulse[] = {96,48,24,12,8,4,2};
+static constexpr int kMidiUnitsPerPulse = 4; // MIDI clock = 24 PPQN
 
 
 // The NT sees one shared editor, not 16 copies of every segment.
@@ -50,7 +56,9 @@ enum SharedParameter {
  pTest,pBaseDivision,pSlew,pWarp,pSquish,
  pShape,pRepeats,pRelDuration,pFixedDuration,pTiming,pCurve,pPinch,pHeight,
  pDepth,pWidth,pSteps,pContour,pEditCount,pReset,
- pRandomRefresh,pRegenerateSegment,pRegenerateAll,pRegenerateIn,pRandomSteps,pCount
+ pRandomRefresh,pRegenerateSegment,pRegenerateAll,pRegenerateIn,pRandomSteps,
+ // v0.7.0: appended only, so all earlier parameter IDs are unchanged.
+ pClockSource,pClockIn,pClockRate,pResetIn,pCount
 };
 static const _NT_parameter kSharedDefaults[pCount]={
  {"Segments",1,16,4,kNT_unitNone,0,nullptr},
@@ -84,8 +92,14 @@ static const _NT_parameter kSharedDefaults[pCount]={
  {"Regenerate segment",0,1,0,kNT_unitConfirm,0,nullptr},
  {"Regenerate all",0,1,0,kNT_unitConfirm,0,nullptr},
  {"Regen trigger in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr},
- {"Random steps",1,16,1,kNT_unitNone,0,nullptr}
+ {"Random steps",1,16,1,kNT_unitNone,0,nullptr},
+ {"Clock source",0,2,kClockInternal,kNT_unitEnum,0,kClockSources},
+ {"Clock in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr},
+ {"Clock PPQN",0,6,2,kNT_unitEnum,0,kClockRates},
+ {"Reset in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr}
 };
+// Edit is the first page so the NT opens on "Edit segment" when loaded.
+enum PageIndex { kPageEdit=0,kPageMain,kPageClock,kPageOutput,kPageSequence,kPageRandom,kPageCount };
 struct Segment {
  uint8_t shape,repeats,timing,relative,fixed,pinch,depth,width,steps,contour,randomRefresh,randomSteps;
  int8_t curve,height,warp,squish;
@@ -93,11 +107,12 @@ struct Segment {
 static Segment defaultSegment(){return {kRampDown,1,0,2,4,50,100,50,8,0,0,1,0,0,0,0};}
 struct ShapeLFO : public _NT_algorithm {
  Segment segments[kMaxSegments];
- _NT_parameterPage pages[5];
+ _NT_parameterPage pages[kPageCount];
  _NT_parameterPages pageSet;
  uint8_t editParams[16];
  uint8_t sequenceParams[1];
  uint8_t randomParams[2];
+ uint8_t clockParams[4];
  int16_t countRequest;
  bool syncCount,updatingCount,resetPending,syncingEditor,pendingEditorSync;
  bool resetRegenSegmentPending,resetRegenAllPending;
@@ -118,11 +133,28 @@ struct ShapeLFO : public _NT_algorithm {
  // Manual/CV requests are deferred to whole-pattern boundaries.
  float randomValues[kMaxSegments][17];
  uint32_t rngState;
+ // External clock state (audio thread). The playhead may advance at most
+ // `clockBudget` ticks before the next pulse arrives; each pulse first
+ // completes any unspent budget, so the playhead lands exactly on the
+ // pulse's grid position and can never drift or overshoot.
+ uint32_t clockBudget;
+ uint32_t extIncrement;   // ticks per sample, estimated from pulse period
+ float extPeriod;         // samples per pulse (0 = unknown)
+ uint32_t samplesSincePulse;
+ uint8_t longIntervals;
+ uint8_t activeClockSource;
+ bool havePulse,clockGateHigh,resetGateHigh,transportRunning;
+ // MIDI realtime bytes are only recorded here, then handled by step().
+ uint32_t midiClocksPending;
+ uint32_t midiTransport;  // 0 none, 1 start, 2 continue, 3 stop (last wins)
  ShapeLFO():countRequest(-1),syncCount(false),updatingCount(false),resetPending(false),
   syncingEditor(false),pendingEditorSync(false),resetRegenSegmentPending(false),
   resetRegenAllPending(false),regenerateGateHigh(false),pendingRandomRegeneration(0),
   segmentTicks(0),lastThreshold(0),currentSegment(0),
-  previewPhase(0),testSamples(0),slewPrevious(0),slewStarted(false),rngState(0x9e3779b9u){
+  previewPhase(0),testSamples(0),slewPrevious(0),slewStarted(false),rngState(0x9e3779b9u),
+  clockBudget(0),extIncrement(0),extPeriod(0),samplesSincePulse(0),longIntervals(0),
+  activeClockSource(kClockInternal),havePulse(false),clockGateHigh(false),resetGateHigh(false),
+  transportRunning(true),midiClocksPending(0),midiTransport(0){
   for(int i=0;i<kMaxSegments;++i){
    segments[i]=defaultSegment();
    skipFreeAtNextEntry[i]=false;
@@ -139,17 +171,20 @@ struct ShapeLFO : public _NT_algorithm {
   static const uint8_t outputParams[]={pOutput,pOutputMode,pSlew,pTest};
   sequenceParams[0]=pSegments;
   randomParams[0]=pRegenerateAll;randomParams[1]=pRegenerateIn;
+  clockParams[0]=pClockSource;clockParams[1]=pClockIn;
+  clockParams[2]=pClockRate;clockParams[3]=pResetIn;
   // Populate the Edit page before the NT's very first UI draw. No
   // callback can rely on v[] until the host has attached its values.
   const uint8_t initialEdit[]={pSelected,pShape,pRelDuration,pRepeats,pCurve,
       pPinch,pHeight,pDepth,pWarp,pSquish,pTiming,pReset,pEditCount};
   for(int i=0;i<13;++i)editParams[i]=initialEdit[i];
-  pages[0]={"Main",5,0,{0,0},mainParams};
-  pages[1]={"Edit",13,0,{0,0},editParams};
-  pages[2]={"Output",4,0,{0,0},outputParams};
-  pages[3]={"Sequence",1,0,{0,0},sequenceParams};
-  pages[4]={"Random",2,0,{0,0},randomParams};
-  pageSet={5,pages};parameterPages=&pageSet;
+  pages[kPageEdit]={"Edit",13,0,{0,0},editParams};
+  pages[kPageMain]={"Main",5,0,{0,0},mainParams};
+  pages[kPageClock]={"Clock",4,0,{0,0},clockParams};
+  pages[kPageOutput]={"Output",4,0,{0,0},outputParams};
+  pages[kPageSequence]={"Sequence",1,0,{0,0},sequenceParams};
+  pages[kPageRandom]={"Random",2,0,{0,0},randomParams};
+  pageSet={kPageCount,pages};parameterPages=&pageSet;
  }
 };
 static inline float clampf(float x,float lo,float hi){return x<lo?lo:(x>hi?hi:x);}
@@ -179,21 +214,22 @@ static void updateEditPage(ShapeLFO* s,bool informHost){
  const Segment& g=s->segments[selected(s)];
  s->editParams[next++]=pSelected;
  s->editParams[next++]=pShape;
+ // Random controls sit directly under Shape: Refresh, Regenerate, steps.
+ if(g.shape==kRandom || g.shape==kSmoothRandom){
+  s->editParams[next++]=pRandomRefresh;
+  s->editParams[next++]=pRegenerateSegment;
+  s->editParams[next++]=pRandomSteps;
+ }
  s->editParams[next++]=g.timing?pFixedDuration:pRelDuration;
  s->editParams[next++]=pRepeats;
  if(g.shape==kSquare)s->editParams[next++]=pWidth;
  else if(g.shape==kSteps){
   s->editParams[next++]=pSteps;s->editParams[next++]=pContour;s->editParams[next++]=pCurve;
  }else if(g.shape==kRampDown || g.shape==kRampUp)s->editParams[next++]=pCurve;
- if(g.shape==kRandom || g.shape==kSmoothRandom){
-  s->editParams[next++]=pRandomSteps;
-  s->editParams[next++]=pRandomRefresh;
-  s->editParams[next++]=pRegenerateSegment;
- }
  s->editParams[next++]=pPinch;s->editParams[next++]=pHeight;s->editParams[next++]=pDepth;
  s->editParams[next++]=pWarp;s->editParams[next++]=pSquish;
  s->editParams[next++]=pTiming;s->editParams[next++]=pReset;s->editParams[next++]=pEditCount;
- s->pages[1].numParams=static_cast<uint8_t>(next);
+ s->pages[kPageEdit].numParams=static_cast<uint8_t>(next);
  if(informHost){int index=NT_algorithmIndex(s);if(index>=0)NT_updateParameterPages(static_cast<uint32_t>(index));}
 }
 static void pushEditorValues(ShapeLFO* s){
@@ -559,6 +595,102 @@ static float evaluateAtUnits(const ShapeLFO* s,float position,int* activeSlot) {
 static uint32_t thresholdFor(const ShapeLFO* s,int slot,uint32_t sampleRate) {
     return 5u*sampleRate*static_cast<uint32_t>(durationUnits(s,slot));
 }
+static inline uint32_t safeSampleRate() {
+    return (NT_globals.sampleRate >= 8000 && NT_globals.sampleRate <= 192000)
+        ? NT_globals.sampleRate : 48000;
+}
+// The playhead is (slot, ticks). One 1/384-bar unit = 5*sampleRate ticks.
+struct Playhead { uint32_t ticks; int slot; uint32_t threshold; float invThreshold; };
+// Move forward, possibly across several segments: an external clock
+// catch-up can be longer than a short segment. With the internal clock
+// this is exactly the v0.6.1 arithmetic (at most one boundary per sample).
+static inline void advancePlayhead(ShapeLFO* s,Playhead& p,uint32_t amount,uint32_t sampleRate) {
+    p.ticks+=amount;
+    while(p.ticks>=p.threshold) {
+        // Exact residual clock ticks preserve beat alignment at boundaries.
+        p.ticks-=p.threshold;
+        ++p.slot;
+        if(p.slot>=count(s)) {
+            p.slot=0;
+            // Manual/CV regeneration is applied only at a pattern start:
+            // here, or on an external reset (also a pattern start).
+            applyQueuedRandom(s);
+        }
+        enterSegment(s,p.slot);
+        p.threshold=thresholdFor(s,p.slot,sampleRate);
+        p.invThreshold=1.0f/static_cast<float>(p.threshold);
+    }
+}
+// Reset returns to the start of segment 1 immediately. That is a whole-
+// pattern boundary, so queued regeneration and Free refresh apply there.
+static void resetPlayhead(ShapeLFO* s,Playhead& p,uint32_t sampleRate) {
+    if(p.slot!=0 || p.ticks!=0) {
+        p.slot=0;p.ticks=0;
+        applyQueuedRandom(s);
+        enterSegment(s,0);
+    }
+    p.threshold=thresholdFor(s,0,sampleRate);
+    p.invThreshold=1.0f/static_cast<float>(p.threshold);
+}
+// One external clock pulse. First finish the previous pulse's span (so the
+// playhead sits exactly on this pulse's grid position), then allow one more
+// pulse span of free-running at the measured tempo. If the clock stops, the
+// playhead stops on the next grid position instead of running on.
+static void clockPulse(ShapeLFO* s,Playhead& p,uint32_t interval,uint32_t pulseTicks,
+                       float smoothing,uint32_t sampleRate) {
+    if(s->transportRunning) {
+        if(s->clockBudget)advancePlayhead(s,p,s->clockBudget,sampleRate);
+        s->clockBudget=pulseTicks;
+    }
+    if(s->havePulse && interval>0) {
+        const float measured=static_cast<float>(interval);
+        if(s->extPeriod>0.0f && measured>3.0f*s->extPeriod && s->longIntervals==0) {
+            // The first pulse after a pause: keep the previous tempo. A
+            // second long interval in a row is accepted as a real slowdown.
+            s->longIntervals=1;
+        } else {
+            s->longIntervals=0;
+            s->extPeriod=(s->extPeriod>0.0f)
+                ? s->extPeriod+(measured-s->extPeriod)*smoothing : measured;
+        }
+    }
+    s->havePulse=true;
+    s->samplesSincePulse=0;
+    if(s->extPeriod>0.0f) {
+        const float inc=static_cast<float>(pulseTicks)/s->extPeriod;
+        s->extIncrement=inc<1.0f?1u:static_cast<uint32_t>(inc+0.5f);
+    }
+}
+static int clockUnitsPerPulse(const ShapeLFO* s,int source) {
+    if(source==kClockMidi)return kMidiUnitsPerPulse;
+    int r=s->v[pClockRate];r=r<0?0:(r>6?6:r);
+    return kClockUnitsPerPulse[r];
+}
+// Measured external tempo for the display; 0 when no clock is present.
+static int externalBpm(const ShapeLFO* s,int source) {
+    if(!s->havePulse || s->extPeriod<=0.0f)return 0;
+    const float sr=static_cast<float>(safeSampleRate());
+    if(static_cast<float>(s->samplesSincePulse)>4.0f*s->extPeriod+0.1f*sr)return 0;
+    const float bpm=60.0f*sr*static_cast<float>(clockUnitsPerPulse(s,source))
+                    /(96.0f*s->extPeriod);
+    const int rounded=static_cast<int>(bpm+0.5f);
+    return rounded<1?1:(rounded>999?999:rounded);
+}
+static void midiRealtime(_NT_algorithm* alg,uint8_t byte) {
+    // Record only; step() applies these at the start of its next block.
+    // midiTransport: low nibble = last event, 0x10 = a Start occurred.
+    ShapeLFO* s=static_cast<ShapeLFO*>(alg);
+    const uint32_t t=__atomic_load_n(&s->midiTransport,__ATOMIC_RELAXED);
+    switch(byte) {
+        case 0xF8: __atomic_fetch_add(&s->midiClocksPending,1u,__ATOMIC_RELAXED);break;
+        case 0xFA: // Start: the NEXT clock is the downbeat.
+            __atomic_store_n(&s->midiClocksPending,0u,__ATOMIC_RELAXED);
+            __atomic_store_n(&s->midiTransport,0x11u,__ATOMIC_RELAXED);break;
+        case 0xFB: __atomic_store_n(&s->midiTransport,(t&0x10u)|2u,__ATOMIC_RELAXED);break;
+        case 0xFC: __atomic_store_n(&s->midiTransport,(t&0x10u)|3u,__ATOMIC_RELAXED);break;
+        default: break;
+    }
+}
 static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     ShapeLFO* s=static_cast<ShapeLFO*>(alg);
     const int frames=numFramesBy4*4;
@@ -566,24 +698,69 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     const int bus=s->v[pOutput];
     float* out=bus>0 ? buses+(bus-1)*frames : nullptr;
     const bool replace=s->v[pOutputMode]!=0;
-    const uint32_t sampleRate =
-        (NT_globals.sampleRate >= 8000 && NT_globals.sampleRate <= 192000)
-        ? NT_globals.sampleRate : 48000;
+    const uint32_t sampleRate=safeSampleRate();
     int bpm=s->v[pBpm];
     if(bpm<20)bpm=20;
     if(bpm>300)bpm=300;
-    uint32_t ticks=s->segmentTicks;
-    int slot=s->currentSegment;
-    if(slot>=count(s))slot=0;
-    uint32_t threshold=thresholdFor(s,slot,sampleRate);
-    if(s->lastThreshold && s->lastThreshold!=threshold) {
+    Playhead p;
+    p.ticks=s->segmentTicks;
+    p.slot=s->currentSegment;
+    if(p.slot>=count(s))p.slot=0;
+    p.threshold=thresholdFor(s,p.slot,sampleRate);
+    if(s->lastThreshold && s->lastThreshold!=p.threshold) {
         // Float is deliberate: a 64-bit integer divide would import
         // __aeabi_uldivmod, which the NT plugin loader may not provide.
-        const float phase=static_cast<float>(ticks)/static_cast<float>(s->lastThreshold);
-        ticks=static_cast<uint32_t>(phase*static_cast<float>(threshold));
+        const float phase=static_cast<float>(p.ticks)/static_cast<float>(s->lastThreshold);
+        p.ticks=static_cast<uint32_t>(phase*static_cast<float>(p.threshold));
     }
-    if(ticks>=threshold)ticks=threshold-1;
-    float invThreshold=1.0f/static_cast<float>(threshold);
+    if(p.ticks>=p.threshold)p.ticks=p.threshold-1;
+    p.invThreshold=1.0f/static_cast<float>(p.threshold);
+    // ---- Clock source. Switching source never jumps the playhead; an
+    // external source simply waits for its first pulse.
+    int source=s->v[pClockSource];
+    source=(source<kClockInternal||source>kClockMidi)?kClockInternal:source;
+    if(source!=s->activeClockSource) {
+        s->activeClockSource=static_cast<uint8_t>(source);
+        s->clockBudget=0;s->havePulse=false;s->extPeriod=0.0f;s->longIntervals=0;
+        s->clockGateHigh=false;s->transportRunning=true;
+    }
+    const bool external=source!=kClockInternal;
+    const uint32_t pulseTicks=5u*sampleRate*static_cast<uint32_t>(clockUnitsPerPulse(s,source));
+    const uint32_t midiTransport=__atomic_exchange_n(&s->midiTransport,0u,__ATOMIC_RELAXED);
+    const uint32_t midiClocks=__atomic_exchange_n(&s->midiClocksPending,0u,__ATOMIC_RELAXED);
+    if(source==kClockMidi) {
+        // MIDI arrives between blocks, so it is applied at block start.
+        if(midiTransport&0x10u) {
+            s->transportRunning=true;
+            resetPlayhead(s,p,sampleRate);
+            s->clockBudget=0; // wait for the downbeat clock after Start
+        }
+        const uint32_t event=midiTransport&0x0Fu;
+        if(event==1u || event==2u)s->transportRunning=true;
+        else if(event==3u)s->transportRunning=false;
+        if(midiClocks) {
+            const uint32_t each=s->samplesSincePulse/midiClocks;
+            for(uint32_t c=0;c<midiClocks;++c)clockPulse(s,p,each,pulseTicks,0.2f,sampleRate);
+        }
+    }
+    if(!external || !s->havePulse)s->extIncrement=static_cast<uint32_t>(8*bpm);
+    const int clockBus=s->v[pClockIn];
+    const float* clockIn=(source==kClockCv && clockBus>0 && clockBus<=kNT_lastBus)
+        ? buses+(clockBus-1)*frames:nullptr;
+    const int resetBus=s->v[pResetIn];
+    const float* resetIn=(resetBus>0 && resetBus<=kNT_lastBus)
+        ? buses+(resetBus-1)*frames:nullptr;
+    // Low-PPQN CV clocks follow tempo immediately; dense clocks are smoothed.
+    const float cvSmoothing=clockUnitsPerPulse(s,source)>=12?1.0f:0.5f;
+    const uint32_t resetWindow=sampleRate/500; // 2 ms: clock just before reset
+    bool clockHigh=s->clockGateHigh,resetHigh=s->resetGateHigh;
+    // Per-sample playhead lives in registers; `p` is synced only on rare
+    // events (edges, segment boundaries), keeping the v0.6.1 loop cost.
+    uint32_t ticks=p.ticks,threshold=p.threshold;
+    int slot=p.slot;
+    float invThreshold=p.invThreshold;
+#define SLFO_TO_P() do{p.ticks=ticks;p.slot=slot;p.threshold=threshold;p.invThreshold=invThreshold;}while(0)
+#define SLFO_FROM_P() do{ticks=p.ticks;slot=p.slot;threshold=p.threshold;invThreshold=p.invThreshold;}while(0)
     uint32_t testSamples=s->testSamples;
     const uint32_t halfTestCycle=sampleRate/4;
     const int slewChoice=s->v[pSlew];
@@ -611,6 +788,27 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
               1u<<kMaxSegments,__ATOMIC_RELAXED);
          }else if(gateHigh && v<=0.5f)gateHigh=false;
         }else gateHigh=false;
+        // Reset is checked before clock, so a simultaneous clock becomes
+        // the first beat of the restarted pattern.
+        if(resetIn) {
+            const float v=resetIn[i];
+            if(!resetHigh && v>=1.0f) {
+                resetHigh=true;
+                SLFO_TO_P();resetPlayhead(s,p,sampleRate);SLFO_FROM_P();
+                // A clock that arrived up to 2 ms early counts as the downbeat.
+                if(external)s->clockBudget=(s->havePulse && s->samplesSincePulse<=resetWindow)
+                    ? pulseTicks:0u;
+            } else if(resetHigh && v<=0.5f)resetHigh=false;
+        } else resetHigh=false;
+        if(clockIn) {
+            const float v=clockIn[i];
+            if(!clockHigh && v>=1.0f) {
+                clockHigh=true;
+                SLFO_TO_P();
+                clockPulse(s,p,s->samplesSincePulse,pulseTicks,cvSmoothing,sampleRate);
+                SLFO_FROM_P();
+            } else if(clockHigh && v<=0.5f)clockHigh=false;
+        } else clockHigh=false;
         float wave;
         float envelope=1.0f;
         if(s->v[pTest]) {
@@ -630,31 +828,32 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
             volts=previous;
         } else {previous=volts;started=true;}
         if(out) {if(replace)out[i]=volts;else out[i]+=volts;}
-        ticks+=clockIncrement;
-        if(ticks>=threshold) {
-            ticks-=threshold;
-            ++slot;
-    if(slot>=count(s)){
-     slot=0;
-     // Every manual/CV regeneration is applied here and nowhere else.
-     applyQueuedRandom(s);
-    }
-    enterSegment(s,slot);
-    uint32_t nextThreshold=thresholdFor(s,slot,sampleRate);
-            // Exact residual clock ticks preserve beat alignment at boundaries.
-            threshold=nextThreshold;
-            invThreshold=1.0f/static_cast<float>(threshold);
+        uint32_t amount=clockIncrement;
+        if(external) {
+            if(!s->transportRunning)amount=0;
+            else {
+                amount=s->extIncrement<s->clockBudget?s->extIncrement:s->clockBudget;
+                s->clockBudget-=amount;
+            }
+            if(s->samplesSincePulse<0x7fffffffu)++s->samplesSincePulse;
         }
+        ticks+=amount;
+        if(ticks>=threshold){SLFO_TO_P();advancePlayhead(s,p,0,sampleRate);SLFO_FROM_P();}
     }
+    SLFO_TO_P();
+#undef SLFO_TO_P
+#undef SLFO_FROM_P
     s->regenerateGateHigh=gateHigh;
-    s->segmentTicks=ticks;
-    s->lastThreshold=threshold;
-    s->currentSegment=static_cast<uint8_t>(slot);
+    s->clockGateHigh=clockHigh;
+    s->resetGateHigh=resetHigh;
+    s->segmentTicks=p.ticks;
+    s->lastThreshold=p.threshold;
+    s->currentSegment=static_cast<uint8_t>(p.slot);
     const int total=totalUnits(s);
     int elapsed=0;
-    for(int i=0;i<slot;++i)elapsed+=durationUnits(s,i);
-    const float inSegment=static_cast<float>(ticks)/static_cast<float>(threshold);
-    s->previewPhase=(elapsed+inSegment*durationUnits(s,slot))/static_cast<float>(total);
+    for(int i=0;i<p.slot;++i)elapsed+=durationUnits(s,i);
+    const float inSegment=static_cast<float>(p.ticks)/static_cast<float>(p.threshold);
+    s->previewPhase=(elapsed+inSegment*durationUnits(s,p.slot))/static_cast<float>(total);
     s->testSamples=testSamples;
     s->slewPrevious=previous;
     s->slewStarted=started;
@@ -694,7 +893,20 @@ static bool draw(_NT_algorithm* alg) {
     consumeEditRequest(s);
     n=count(s);choice=selected(s);
     char left[64];
-    lengthText(left,totalUnits(s));
+    char* lp=left;
+    // External clock status: measured tempo, "--" with no clock, STOP
+    // after a MIDI Stop. Internal clock shows only the pattern length.
+    const int source=s->v[pClockSource];
+    if(source==kClockCv || source==kClockMidi) {
+        appendText(lp,source==kClockCv?"CV ":"MIDI ");
+        if(source==kClockMidi && !s->transportRunning)appendText(lp,"STOP");
+        else {
+            const int ext=externalBpm(s,source);
+            if(ext>0)appendInt(lp,ext);else appendText(lp,"--");
+        }
+        appendText(lp,"  ");
+    }
+    lengthText(lp,totalUnits(s));
     // Large waveform takes priority. The NT help overlay may cover these
     // bottom status labels while a control is touched; that is acceptable.
     NT_drawText(3,58,left,11,kNT_textLeft,kNT_textTiny);
@@ -773,9 +985,9 @@ static int parameterString(_NT_algorithm*,int param,int value,char* buffer){
  *p=0;return static_cast<int>(p-buffer);
 }
 static const _NT_factory kFactory={
- NT_MULTICHAR('S','L','F','2'),"Shape LFO","Shape LFO v0.6.1",
+ NT_MULTICHAR('S','L','F','2'),"Shape LFO","Shape LFO v0.7.0",
  0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
- draw,nullptr,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
+ draw,midiRealtime,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
  nullptr,nullptr,nullptr,nullptr,parameterString,nullptr
 };
 } // namespace
