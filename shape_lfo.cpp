@@ -1,4 +1,4 @@
-// Shape LFO v0.11.1 32 segments, duplicate/delete, zoomed view, pattern bank + preset saving, gate output, play modes, external clock for Expert Sleepers disting NT
+// Shape LFO v0.12.0 scale quantizer, 32 segments, duplicate/delete, zoomed view, pattern bank + preset saving, gate output, play modes, external clock for Expert Sleepers disting NT
 // Copyright (c) 2026. MIT license.
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -14,9 +14,13 @@ namespace {
 constexpr int kMaxSegments = 32;
 // Segments 0..15 seed their random tables exactly as before v0.11.
 constexpr int kLegacySegments = 16;
-// Display: above this many segments, show a window that follows Edit segment.
-constexpr int kZoomAbove = 12;
-constexpr int kZoomWindow = 8;
+// Display: above kZoomWindow segments, show a window of kZoomWindow segments
+// that follows Edit segment. Build with -DSLFO_ZOOM_WINDOW=4 for a 4-segment window.
+#ifndef SLFO_ZOOM_WINDOW
+#define SLFO_ZOOM_WINDOW 8
+#endif
+constexpr int kZoomWindow = SLFO_ZOOM_WINDOW;
+constexpr int kZoomAbove = kZoomWindow;
 constexpr int kNumPatterns = 16;
 
 enum Shape { kRampDown=0, kRampUp=1, kSine=2, kSquare=3, kHigh=4, kLow=5,
@@ -54,6 +58,17 @@ enum ClockSource { kClockInternal=0, kClockCv=1, kClockMidi=2 };
 static char const* const kClockRates[] = {"1 (1/4)", "2 (1/8)", "4 (1/16)", "8 (1/32)", "12", "24", "48"};
 static constexpr int kClockUnitsPerPulse[] = {96,48,24,12,8,4,2};
 static constexpr int kMidiUnitsPerPulse = 4; // MIDI clock = 24 PPQN
+// Scale quantizer (1 V/octave, 0 V = C). Bit n = n semitones above Root.
+static char const* const kScales[] = {"Off", "Major", "Minor", "Major pent", "Minor pent",
+                                      "Dorian", "Mixolydian"};
+static constexpr uint16_t kScaleMasks[] = {0x000,
+    0xAB5,  // Major       0 2 4 5 7 9 11
+    0x5AD,  // Minor       0 2 3 5 7 8 10
+    0x295,  // Major pent  0 2 4 7 9
+    0x4A9,  // Minor pent  0 3 5 7 10
+    0x6AD,  // Dorian      0 2 3 5 7 9 10
+    0x6B5}; // Mixolydian  0 2 4 5 7 9 10
+static char const* const kRootNotes[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
 static char const* const kPlayModes[] = {"Loop", "One-shot", "Step advance", "Ping-pong"};
 enum PlayMode { kPlayLoop=0, kPlayOneShot=1, kPlayStep=2, kPlayPingPong=3, kPlayUnset=255 };
 static char const* const kGateModes[] = {"Above", "Below", "Rising", "Falling", "Both",
@@ -85,7 +100,9 @@ enum SharedParameter {
  // v0.11.0: appended.
  pDuplicateSegment,pDeleteSegment,
  // v0.11.1: appended.
- pNextRangeStart,pNextRangeEnd,pCount
+ pNextRangeStart,pNextRangeEnd,
+ // v0.12.0: appended.
+ pQuantize,pRoot,pCount
 };
 static const _NT_parameter kSharedDefaults[pCount]={
  {"Edit segment",1,kMaxSegments,1,kNT_unitNone,0,nullptr},
@@ -137,8 +154,10 @@ static const _NT_parameter kSharedDefaults[pCount]={
  {"Next pattern in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr},
  {"Duplicate segment",0,1,0,kNT_unitConfirm,0,nullptr},
  {"Delete segment",0,1,0,kNT_unitConfirm,0,nullptr},
- {"Next range start",1,kNumPatterns,1,kNT_unitNone,0,nullptr},
- {"Next range end",1,kNumPatterns,kNumPatterns,kNT_unitNone,0,nullptr}
+ {"Pattern loop start",1,kNumPatterns,1,kNT_unitNone,0,nullptr},
+ {"Pattern loop end",1,kNumPatterns,kNumPatterns,kNT_unitNone,0,nullptr},
+ {"Quantize",0,6,0,kNT_unitEnum,0,kScales},
+ {"Root",0,11,0,kNT_unitEnum,0,kRootNotes}
 };
 // Edit is the first page so the NT opens on "Edit segment" when loaded.
 enum PageIndex { kPageEdit=0,kPagePattern,kPageClock,kPageOutput,kPageRouting,kPageCount };
@@ -253,7 +272,8 @@ struct ShapeLFO : public _NT_algorithm {
   static const uint8_t clockParams[]={pClockSource,pBpm,pClockRate};
   // Gate out appears here (next to its settings) AND on Routing; it is
   // the same parameter on both pages.
-  static const uint8_t outputParams[]={pRange,pAmplitude,pOffset,pSlew,pGateOut,pGateMode,pGateThreshold};
+  static const uint8_t outputParams[]={pRange,pAmplitude,pOffset,pQuantize,pRoot,pSlew,
+                                       pGateOut,pGateMode,pGateThreshold};
   static const uint8_t routingParams[]={pOutput,pOutputMode,pGateOut,pGateOutputMode,pClockIn,
                                         pResetIn,pTriggerIn,pRegenerateIn,pPatternCvIn,
                                         pNextPatternIn,pTest};
@@ -265,7 +285,7 @@ struct ShapeLFO : public _NT_algorithm {
   pages[kPageEdit]={"Edit",15,0,{0,0},editParams};
   pages[kPagePattern]={"Pattern",9,0,{0,0},patternParams};
   pages[kPageClock]={"Clock",3,0,{0,0},clockParams};
-  pages[kPageOutput]={"Output",7,0,{0,0},outputParams};
+  pages[kPageOutput]={"Output",9,0,{0,0},outputParams};
   pages[kPageRouting]={"Routing",11,0,{0,0},routingParams};
   pageSet={kPageCount,pages};parameterPages=&pageSet;
  }
@@ -803,6 +823,22 @@ static inline float gateThresholdVolts(const ShapeLFO* s,float* hysteresis) {
     return lo+(hi-lo)*static_cast<float>(pct)*0.01f;
 }
 static constexpr float kGateHighVolts=5.0f;
+// Snap to the nearest note of the scale (ties go to the lower note).
+// Largest gap in these scales is 3 semitones, so 6 candidates suffice.
+static inline float quantizeVolts(float volts,int scale,int root) {
+    const uint32_t mask=kScaleMasks[scale];
+    const float semis=volts*12.0f;
+    int base=static_cast<int>(semis);
+    if(static_cast<float>(base)>semis)--base; // floor
+    int best=base;float bestDist=1.0e9f;
+    for(int c=base-2;c<=base+3;++c) {
+        int pc=(c-root)%12;if(pc<0)pc+=12;
+        if(!(mask&(1u<<pc)))continue;
+        float d=semis-static_cast<float>(c);if(d<0.0f)d=-d;
+        if(d<bestDist){bestDist=d;best=c;}
+    }
+    return static_cast<float>(best)*(1.0f/12.0f);
+}
 static float scaleOutput(const ShapeLFO* s,float wave,float envelope,int slot) {
     float center=0.0f,radius=5.0f;
     if(s->v[pRange]==1){center=2.5f;radius=2.5f;}
@@ -815,7 +851,13 @@ static float scaleOutput(const ShapeLFO* s,float wave,float envelope,int slot) {
     const float base=center-radius*anchorAt(s,slot);
     float volts=base+amp*(radius*wave+(center-base)*envelope);
     volts+=s->v[pOffset]*0.001f;
-    return clampf(volts,-10.0f,10.0f);
+    volts=clampf(volts,-10.0f,10.0f);
+    const int scale=s->v[pQuantize];
+    if(scale>0 && scale<=6) {
+        int root=s->v[pRoot];root=root<0?0:(root>11?11:root);
+        volts=quantizeVolts(volts,scale,root);
+    }
+    return volts;
 }
 // The preview uses exactly the same output-voltage transform as the DSP.
 // Unlike the audio path, it does not simulate output slew.
@@ -1452,7 +1494,7 @@ static bool draw(_NT_algorithm* alg) {
     if(s->v[pRange]==1){viewMin=0.0f;viewMax=5.0f;}
     else if(s->v[pRange]==2){viewMin=0.0f;viewMax=10.0f;}
     const int zeroY=(s->v[pRange]==0)?(y0+y1)/2:y1;
-    NT_drawShapeI(kNT_line,x0,zeroY,x1,zeroY,3);
+    NT_drawShapeI(kNT_line,x0,zeroY,x1,zeroY,1); // dim, so the gate line stands out
     const float pixelsPerVolt=static_cast<float>(y1-y0)/(viewMax-viewMin);
     auto toY=[&](float volts) -> int {
         const float clipped=clampf(volts,viewMin,viewMax);
@@ -1693,8 +1735,13 @@ static bool deserialise(_NT_algorithm* alg,_NT_jsonParse& parse){
  }
  return true;
 }
+#if SLFO_ZOOM_WINDOW==8
+#define SLFO_DESCRIPTION "Shape LFO v0.12.0"
+#else
+#define SLFO_DESCRIPTION "Shape LFO v0.12.0 zoom4"
+#endif
 static const _NT_factory kFactory={
- NT_MULTICHAR('S','L','F','2'),"Shape LFO","Shape LFO v0.11.1",
+ NT_MULTICHAR('S','L','F','2'),"Shape LFO",SLFO_DESCRIPTION,
  0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
  draw,midiRealtime,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
  serialise,deserialise,nullptr,nullptr,parameterString,nullptr
