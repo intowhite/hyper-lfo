@@ -1,4 +1,4 @@
-// Shape LFO v0.10.0 pattern bank + preset saving, gate output, play modes, external clock for Expert Sleepers disting NT
+// Shape LFO v0.11.1 32 segments, duplicate/delete, zoomed view, pattern bank + preset saving, gate output, play modes, external clock for Expert Sleepers disting NT
 // Copyright (c) 2026. MIT license.
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -11,7 +11,12 @@
 inline void* operator new(size_t, void* p) noexcept { return p; }
 
 namespace {
-constexpr int kMaxSegments = 16;
+constexpr int kMaxSegments = 32;
+// Segments 0..15 seed their random tables exactly as before v0.11.
+constexpr int kLegacySegments = 16;
+// Display: above this many segments, show a window that follows Edit segment.
+constexpr int kZoomAbove = 12;
+constexpr int kZoomWindow = 8;
 constexpr int kNumPatterns = 16;
 
 enum Shape { kRampDown=0, kRampUp=1, kSine=2, kSquare=3, kHigh=4, kLow=5,
@@ -76,11 +81,15 @@ enum SharedParameter {
  // v0.9.0: appended.
  pGateOut,pGateMode,pGateThreshold,pGateOutputMode,
  // v0.10.0: appended.
- pPattern,pCopyTo,pCopyPattern,pPatternCvIn,pNextPatternIn,pCount
+ pPattern,pCopyTo,pCopyPattern,pPatternCvIn,pNextPatternIn,
+ // v0.11.0: appended.
+ pDuplicateSegment,pDeleteSegment,
+ // v0.11.1: appended.
+ pNextRangeStart,pNextRangeEnd,pCount
 };
 static const _NT_parameter kSharedDefaults[pCount]={
- {"Edit segment",1,16,1,kNT_unitNone,0,nullptr},
- {"Segments",1,16,4,kNT_unitNone,0,nullptr},
+ {"Edit segment",1,kMaxSegments,1,kNT_unitNone,0,nullptr},
+ {"Segments",1,kMaxSegments,4,kNT_unitNone,0,nullptr},
  {"Internal BPM",20,300,120,kNT_unitBPM,0,nullptr},
  {"Voltage",0,2,0,kNT_unitEnum,0,kRanges},
  {"Amplitude",0,100,100,kNT_unitPercent,0,nullptr},
@@ -104,7 +113,7 @@ static const _NT_parameter kSharedDefaults[pCount]={
  {"Pulse Width",5,95,50,kNT_unitPercent,0,nullptr},
  {"Steps",2,16,8,kNT_unitNone,0,nullptr},
  {"Contour",0,3,0,kNT_unitEnum,0,kStepContours},
- {"Add/Remove",1,16,4,kNT_unitNone,0,nullptr},
+ {"Add/Remove",1,kMaxSegments,4,kNT_unitNone,0,nullptr},
  {"Reset segment",0,1,0,kNT_unitConfirm,0,nullptr},
  {"Refresh",0,1,0,kNT_unitEnum,0,kRandomRefresh},
  {"Regenerate segment",0,1,0,kNT_unitConfirm,0,nullptr},
@@ -125,7 +134,11 @@ static const _NT_parameter kSharedDefaults[pCount]={
  {"Copy to",1,kNumPatterns,2,kNT_unitNone,0,nullptr},
  {"Copy pattern",0,1,0,kNT_unitConfirm,0,nullptr},
  {"Pattern CV in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr},
- {"Next pattern in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr}
+ {"Next pattern in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr},
+ {"Duplicate segment",0,1,0,kNT_unitConfirm,0,nullptr},
+ {"Delete segment",0,1,0,kNT_unitConfirm,0,nullptr},
+ {"Next range start",1,kNumPatterns,1,kNT_unitNone,0,nullptr},
+ {"Next range end",1,kNumPatterns,kNumPatterns,kNT_unitNone,0,nullptr}
 };
 // Edit is the first page so the NT opens on "Edit segment" when loaded.
 enum PageIndex { kPageEdit=0,kPagePattern,kPageClock,kPageOutput,kPageRouting,kPageCount };
@@ -147,16 +160,20 @@ struct ShapeLFO : public _NT_algorithm {
  Segment segments[kMaxSegments];
  _NT_parameterPage pages[kPageCount];
  _NT_parameterPages pageSet;
- uint8_t editParams[16];
+ uint8_t editParams[20];
  int16_t countRequest;
  bool syncCount,updatingCount,resetPending,syncingEditor,pendingEditorSync;
+ bool duplicatePending,deletePending;
+ // Zoomed display: first segment of the visible window (UI side only).
+ uint8_t viewFirst;
  bool resetRegenSegmentPending,resetRegenAllPending;
  bool skipFreeAtNextEntry[kMaxSegments];
  bool regenerateGateHigh;
- // Bit 0..15: regenerate that segment. Bit 16: regenerate all active
- // random segments. Producers run in UI/audio contexts, consumed on
- // the NEXT whole-chain wrap only. Repeated requests coalesce.
+ // Bit n: regenerate segment n. pendingRegenerateAll: regenerate all
+ // active random segments. Producers run in UI/audio contexts, consumed
+ // at the NEXT pattern start only. Repeated requests coalesce.
  uint32_t pendingRandomRegeneration;
+ uint32_t pendingRegenerateAll;
  uint32_t segmentTicks,lastThreshold;
  uint8_t currentSegment;
  float previewPhase;
@@ -204,8 +221,8 @@ struct ShapeLFO : public _NT_algorithm {
  uint8_t ovCount,ovBase,ovMode;
  int8_t lastPatternCv;
  ShapeLFO():countRequest(-1),syncCount(false),updatingCount(false),resetPending(false),
-  syncingEditor(false),pendingEditorSync(false),resetRegenSegmentPending(false),
-  resetRegenAllPending(false),regenerateGateHigh(false),pendingRandomRegeneration(0),
+  syncingEditor(false),pendingEditorSync(false),duplicatePending(false),deletePending(false),viewFirst(0),resetRegenSegmentPending(false),
+  resetRegenAllPending(false),regenerateGateHigh(false),pendingRandomRegeneration(0),pendingRegenerateAll(0),
   segmentTicks(0),lastThreshold(0),currentSegment(0),
   previewPhase(0),testSamples(0),slewPrevious(0),slewStarted(false),rngState(0x9e3779b9u),
   clockBudget(0),extIncrement(0),extPeriod(0),samplesSincePulse(0),longIntervals(0),
@@ -216,12 +233,14 @@ struct ShapeLFO : public _NT_algorithm {
   bank(nullptr),requestedPattern(-1),currentPattern(0),patternOverride(false),patternHostSync(false),
   syncingPattern(false),copyPending(false),nextPatternHigh(false),ovCount(4),ovBase(6),ovMode(0),
   lastPatternCv(-1){
+  uint32_t extra=0x6d2b79f5u; // segments 17-32 use their own seed stream
   for(int i=0;i<kMaxSegments;++i){
    segments[i]=defaultSegment();
    skipFreeAtNextEntry[i]=false;
+   uint32_t& r=i<kLegacySegments?rngState:extra;
    for(int j=0;j<17;++j){
-    rngState^=rngState<<13;rngState^=rngState>>17;rngState^=rngState<<5;
-    randomValues[i][j]=(static_cast<float>(rngState&65535u)/32767.5f)-1.0f;
+    r^=r<<13;r^=r>>17;r^=r<<5;
+    randomValues[i][j]=(static_cast<float>(r&65535u)/32767.5f)-1.0f;
    }
   }
   segments[1].repeats=4;
@@ -230,21 +249,23 @@ struct ShapeLFO : public _NT_algorithm {
   parameters=kSharedDefaults;v=nullptr;vIncludingCommon=nullptr;
   // v0.9.0 layout: each page has one job. All inputs/outputs on Routing.
   static const uint8_t patternParams[]={pPattern,pSegments,pPlayMode,pBaseDivision,pRegenerateAll,
-                                        pCopyTo,pCopyPattern};
+                                        pNextRangeStart,pNextRangeEnd,pCopyTo,pCopyPattern};
   static const uint8_t clockParams[]={pClockSource,pBpm,pClockRate};
-  static const uint8_t outputParams[]={pRange,pAmplitude,pOffset,pSlew,pGateMode,pGateThreshold};
+  // Gate out appears here (next to its settings) AND on Routing; it is
+  // the same parameter on both pages.
+  static const uint8_t outputParams[]={pRange,pAmplitude,pOffset,pSlew,pGateOut,pGateMode,pGateThreshold};
   static const uint8_t routingParams[]={pOutput,pOutputMode,pGateOut,pGateOutputMode,pClockIn,
                                         pResetIn,pTriggerIn,pRegenerateIn,pPatternCvIn,
                                         pNextPatternIn,pTest};
   // Populate the Edit page before the NT's very first UI draw. No
   // callback can rely on v[] until the host has attached its values.
   const uint8_t initialEdit[]={pSelected,pShape,pRelDuration,pTiming,pRepeats,pCurve,
-      pPinch,pHeight,pDepth,pWarp,pSquish,pReset,pEditCount};
-  for(int i=0;i<13;++i)editParams[i]=initialEdit[i];
-  pages[kPageEdit]={"Edit",13,0,{0,0},editParams};
-  pages[kPagePattern]={"Pattern",7,0,{0,0},patternParams};
+      pPinch,pHeight,pDepth,pWarp,pSquish,pDuplicateSegment,pDeleteSegment,pReset,pEditCount};
+  for(int i=0;i<15;++i)editParams[i]=initialEdit[i];
+  pages[kPageEdit]={"Edit",15,0,{0,0},editParams};
+  pages[kPagePattern]={"Pattern",9,0,{0,0},patternParams};
   pages[kPageClock]={"Clock",3,0,{0,0},clockParams};
-  pages[kPageOutput]={"Output",6,0,{0,0},outputParams};
+  pages[kPageOutput]={"Output",7,0,{0,0},outputParams};
   pages[kPageRouting]={"Routing",11,0,{0,0},routingParams};
   pageSet={kPageCount,pages};parameterPages=&pageSet;
  }
@@ -301,6 +322,7 @@ static void updateEditPage(ShapeLFO* s,bool informHost){
  }else if(g.shape==kRampDown || g.shape==kRampUp)s->editParams[next++]=pCurve;
  s->editParams[next++]=pPinch;s->editParams[next++]=pHeight;s->editParams[next++]=pDepth;
  s->editParams[next++]=pWarp;s->editParams[next++]=pSquish;
+ s->editParams[next++]=pDuplicateSegment;s->editParams[next++]=pDeleteSegment;
  s->editParams[next++]=pReset;s->editParams[next++]=pEditCount;
  s->pages[kPageEdit].numParams=static_cast<uint8_t>(next);
  if(informHost){int index=NT_algorithmIndex(s);if(index>=0)NT_updateParameterPages(static_cast<uint32_t>(index));}
@@ -407,6 +429,8 @@ static void parameterChanged(_NT_algorithm* alg,int param){
  ShapeLFO* s=static_cast<ShapeLFO*>(alg);
  if(param==pEditCount){if(!s->updatingCount)s->countRequest=s->v[pEditCount];return;}
  if(param==pReset){if(s->v[pReset])s->resetPending=true;return;}
+ if(param==pDuplicateSegment){if(s->v[pDuplicateSegment])s->duplicatePending=true;return;}
+ if(param==pDeleteSegment){if(s->v[pDeleteSegment])s->deletePending=true;return;}
  if(param==pRegenerateSegment){
   if(s->v[pRegenerateSegment]){
    // Capture the selected segment at button press, even if the user
@@ -419,7 +443,7 @@ static void parameterChanged(_NT_algorithm* alg,int param){
  }
  if(param==pRegenerateAll){
   if(s->v[pRegenerateAll]){
-   __atomic_fetch_or(&s->pendingRandomRegeneration,1u<<kMaxSegments,__ATOMIC_RELAXED);
+   __atomic_store_n(&s->pendingRegenerateAll,1u,__ATOMIC_RELAXED);
    s->resetRegenAllPending=true;
   }
   return;
@@ -446,6 +470,40 @@ static void parameterChanged(_NT_algorithm* alg,int param){
  if(param==pTest && s->v[pTest])s->testSamples=0;
  if(param==pSlew && s->v[pSlew]==0)s->slewStarted=false;
 }
+// Move segment `from` (with its random table) into slot `to`.
+static void moveSegment(ShapeLFO* s,int to,int from){
+ s->segments[to]=s->segments[from];
+ s->skipFreeAtNextEntry[to]=false;
+ for(int j=0;j<17;++j){
+  __asm__ volatile("":::"memory");
+  s->randomValues[to][j]=s->randomValues[from][j];
+ }
+}
+// Duplicate: the copy goes into the next slot and the rest shift along
+// (hidden segments too; the last slot drops off the end). The copy is
+// selected, ready to edit. Ignored when the pattern is already full.
+static void duplicateSelected(ShapeLFO* s){
+ const int n=count(s),sel=selected(s);
+ if(n>=kMaxSegments || sel>=n)return;
+ for(int i=kMaxSegments-1;i>sel;--i)moveSegment(s,i,i-1);
+ s->updatingCount=true;
+ setHostParam(s,pSegments,n+1);setHostParam(s,pSelected,sel+2);
+ s->updatingCount=false;
+ s->syncCount=true;s->pendingEditorSync=true;
+}
+// Delete: later segments (hidden ones too) move down to close the gap;
+// the freed last slot gets a default segment. Never deletes the last one.
+static void deleteSelected(ShapeLFO* s){
+ const int n=count(s),sel=selected(s);
+ if(n<=1 || sel>=n)return;
+ for(int i=sel;i<kMaxSegments-1;++i)moveSegment(s,i,i+1);
+ s->segments[kMaxSegments-1]=defaultSegment();
+ s->updatingCount=true;
+ setHostParam(s,pSegments,n-1);
+ if(sel>=n-1)setHostParam(s,pSelected,n-1);
+ s->updatingCount=false;
+ s->syncCount=true;s->pendingEditorSync=true;
+}
 static void consumeEditRequest(ShapeLFO* s){
  if(s->patternHostSync){
   // Show the newly playing pattern's per-pattern values on the controls.
@@ -467,6 +525,15 @@ static void consumeEditRequest(ShapeLFO* s){
    if(s->bank && target>=0 && target<kNumPatterns && target!=s->currentPattern)
     storeWorking(s,s->bank[target],count(s),baseDivision(s),playModeOf(s));
   }
+ }
+ // Segment actions first, so the count/selection sync below sees the result.
+ if(s->duplicatePending){
+  s->duplicatePending=false;
+  if(s->v[pDuplicateSegment]){setHostParam(s,pDuplicateSegment,0);duplicateSelected(s);}
+ }
+ if(s->deletePending){
+  s->deletePending=false;
+  if(s->v[pDeleteSegment]){setHostParam(s,pDeleteSegment,0);deleteSelected(s);}
  }
  if(s->countRequest>=1){
   int wanted=s->countRequest>kMaxSegments?kMaxSegments:s->countRequest;
@@ -699,7 +766,7 @@ static inline void enterSegment(ShapeLFO* s,int slot){
 static void applyQueuedRandom(ShapeLFO* s){
  const uint32_t requests=__atomic_exchange_n(
      &s->pendingRandomRegeneration,0u,__ATOMIC_RELAXED);
- const bool all=(requests&(1u<<kMaxSegments))!=0u;
+ const bool all=__atomic_exchange_n(&s->pendingRegenerateAll,0u,__ATOMIC_RELAXED)!=0u;
  const int active=count(s);
  for(int i=0;i<kMaxSegments;++i){
   if((all && i<active) || (requests&(1u<<i))){
@@ -1049,9 +1116,15 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
             for(int i=0;i<frames;++i) {
                 if(!high && in[i]>=1.0f) {
                     high=true;
+                    // Step through Next range start..end, wrapping to start;
+                    // from outside the range it jumps to the range start.
                     const int32_t pending=__atomic_load_n(&s->requestedPattern,__ATOMIC_RELAXED);
                     const int from=pending>=0?pending:s->currentPattern;
-                    requestPattern(s,(from+1)%kNumPatterns);
+                    int lo=s->v[pNextRangeStart]-1,hi=s->v[pNextRangeEnd]-1;
+                    lo=lo<0?0:(lo>=kNumPatterns?kNumPatterns-1:lo);
+                    hi=hi<0?0:(hi>=kNumPatterns?kNumPatterns-1:hi);
+                    if(lo>hi){const int t=lo;lo=hi;hi=t;}
+                    requestPattern(s,(from<lo || from>=hi)?lo:from+1);
                 } else if(high && in[i]<=0.5f)high=false;
             }
             s->nextPatternHigh=high;
@@ -1159,8 +1232,7 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
              const float v=gate[i];
              if(!gateHigh && v>=1.0f){
               gateHigh=true;
-              __atomic_fetch_or(&s->pendingRandomRegeneration,
-                  1u<<kMaxSegments,__ATOMIC_RELAXED);
+              __atomic_store_n(&s->pendingRegenerateAll,1u,__ATOMIC_RELAXED);
              }else if(gateHigh && v<=0.5f)gateHigh=false;
             }else gateHigh=false;
             // Reset is checked before clock, so a simultaneous clock becomes
@@ -1337,7 +1409,42 @@ static bool draw(_NT_algorithm* alg) {
     *r++=' ';*r++='x';appendInt(r,repeatsAt(s,choice));
     *r++=' ';appendText(r,modeAt(s,choice)?"FIX":"REL");*r=0;
     NT_drawText(251,58,s->v[pTest]?"TEST 2HZ":right,14,kNT_textRight,kNT_textTiny);
-    const int x0=4,x1=251,y0=15,y1=49;
+    // Long patterns (more than kZoomAbove segments) show a window of
+    // kZoomWindow segments that follows Edit segment, plus an overview strip
+    // of the whole pattern. Shorter patterns keep the full view.
+    const int total=totalUnits(s);
+    const bool zoom=n>kZoomAbove;
+    int first=0,last=n;
+    if(zoom) {
+        int vf=s->viewFirst;
+        if(choice<vf)vf=choice;
+        if(choice>=vf+kZoomWindow)vf=choice-kZoomWindow+1;
+        if(vf>n-kZoomWindow)vf=n-kZoomWindow;
+        if(vf<0)vf=0;
+        s->viewFirst=static_cast<uint8_t>(vf);
+        first=vf;last=vf+kZoomWindow;
+    }
+    int segStart[kMaxSegments+1];
+    segStart[0]=0;
+    for(int i=0;i<n;++i)segStart[i+1]=segStart[i]+durationUnits(s,i);
+    const int wStart=segStart[first],wEnd=segStart[last];
+    const int span=(wEnd-wStart)>0?(wEnd-wStart):1;
+    const int x0=4,x1=251,y0=zoom?20:15,y1=49;
+    const int w=x1-x0;
+    auto unitsToX=[&](int units)->int{return x0+(w*(units-wStart))/span;};
+    const float playUnits=s->previewPhase*static_cast<float>(total);
+    if(zoom) {
+        // Overview strip: whole pattern, bracket = visible window, playhead.
+        const int sy=16;
+        NT_drawShapeI(kNT_line,x0,sy,x1,sy,3);
+        const int bl=x0+(w*wStart)/total,br=x0+(w*wEnd)/total;
+        NT_drawShapeI(kNT_line,bl,sy-1,br,sy-1,10);
+        NT_drawShapeI(kNT_line,bl,sy+1,br,sy+1,10);
+        NT_drawShapeI(kNT_line,bl,sy-1,bl,sy+1,10);
+        NT_drawShapeI(kNT_line,br,sy-1,br,sy+1,10);
+        const int px=x0+static_cast<int>(s->previewPhase*static_cast<float>(w));
+        NT_drawShapeI(kNT_line,px,sy-2,px,sy+2,15);
+    }
     // Show the ACTUAL output range, not a signed LFO normalized to +/-1.
     // In a unipolar mode the horizontal baseline means zero volts, at the
     // BOTTOM of the plot; in bipolar mode it marks 0V at the CENTER.
@@ -1351,26 +1458,19 @@ static bool draw(_NT_algorithm* alg) {
         const float clipped=clampf(volts,viewMin,viewMax);
         return y1-static_cast<int>((clipped-viewMin)*pixelsPerVolt+0.5f);
     };
-    const int total=totalUnits(s);
-    int start=0;
-    int selectL=x0,selectR=x0;
-    for(int i=0;i<n;++i) {
-        int end=start+durationUnits(s,i);
-        int xl=x0+((x1-x0)*start)/total;
-        int xr=x0+((x1-x0)*end)/total;
-        if(i==choice){selectL=xl;selectR=xr;}
-        if(i>0)NT_drawShapeI(kNT_line,xl,y0,xl,y1,2);
-        start=end;
+    for(int i=first+1;i<last;++i) {
+        const int xl=unitsToX(segStart[i]);
+        NT_drawShapeI(kNT_line,xl,y0,xl,y1,2);
     }
-    if(choice<n) {
+    if(choice>=first && choice<last) {
+        const int selectL=unitsToX(segStart[choice]),selectR=unitsToX(segStart[choice+1]);
         NT_drawShapeI(kNT_line,selectL,y0,selectL,y1,5);
         NT_drawShapeI(kNT_line,selectR,y0,selectR,y1,5);
         NT_drawShapeI(kNT_line,selectL,y0,selectR,y0,5);
     }
-    const int w=x1-x0;
     for(int x=1;x<=w;++x) {
-        float prevPos=static_cast<float>(total)*(x-1)/w;
-        float nextPos=static_cast<float>(total)*x/w;
+        float prevPos=static_cast<float>(wStart)+static_cast<float>(span)*(x-1)/w;
+        float nextPos=static_cast<float>(wStart)+static_cast<float>(span)*x/w;
         int oldSlot=0,newSlot=0;
         float prevVolts=evaluateAtUnits(s,prevPos,&oldSlot);
         float nextVolts=evaluateAtUnits(s,nextPos,&newSlot);
@@ -1389,8 +1489,14 @@ static bool draw(_NT_algorithm* alg) {
         const int ty=toY(gateThresholdVolts(s,nullptr));
         for(int x=x0;x<=x1-2;x+=6)NT_drawShapeI(kNT_line,x,ty,x+2,ty,8);
     }
-    int cursor=x0+static_cast<int>(s->previewPhase*(x1-x0));
-    NT_drawShapeI(kNT_line,cursor,14,cursor,50,9);
+    // Playhead (in a zoomed view only while it is inside the window).
+    if(!zoom) {
+        int cursor=x0+static_cast<int>(s->previewPhase*(x1-x0));
+        NT_drawShapeI(kNT_line,cursor,14,cursor,50,9);
+    } else if(playUnits>=static_cast<float>(wStart) && playUnits<=static_cast<float>(wEnd)) {
+        const int cursor=x0+static_cast<int>(static_cast<float>(w)*(playUnits-static_cast<float>(wStart))/static_cast<float>(span));
+        NT_drawShapeI(kNT_line,cursor,y0-1,cursor,50,9);
+    }
     return false;
 }
 
@@ -1408,6 +1514,8 @@ static int parameterString(_NT_algorithm*,int param,int value,char* buffer){
  else if(param==pRegenerateSegment)appendText(p,value==0?"Ready":"Queue segment");
  else if(param==pRegenerateAll)appendText(p,value==0?"Ready":"Queue all");
  else if(param==pCopyPattern)appendText(p,value==0?"Ready":"Copy now");
+ else if(param==pDuplicateSegment)appendText(p,value==0?"Ready":"Duplicate");
+ else if(param==pDeleteSegment)appendText(p,value==0?"Ready":"Delete");
  else return 0;
  *p=0;return static_cast<int>(p-buffer);
 }
@@ -1416,8 +1524,11 @@ static int parameterString(_NT_algorithm*,int param,int value,char* buffer){
 //   "format":1, "pattern":<0-15>, "bank":[16 x {"n","b","m","seg","rnd"}]
 //   seg: 32 hex chars per segment (16 bytes in Segment field order), only
 //        up to the last segment that differs from the default.
-//   rnd: one string per segment: 68 hex chars (17 x 16-bit) for Random /
-//        Smooth random segments, "" otherwise.
+//   rnd: one string per segment: 4 hex chars per 16-bit random value for
+//        Random / Smooth random segments in Loop mode (Random steps + 1
+//        values: the steps plus the glide endpoint), "" otherwise. Free mode
+//        rerolls on every entry, so its values are not saved. Loading
+//        accepts 1-17 values (v0.10 always wrote 17).
 // Loading validates every field; anything missing or invalid falls back
 // to the default, so a damaged preset can never produce illegal values.
 static const char kHex[]="0123456789abcdef";
@@ -1489,9 +1600,12 @@ static void serialise(_NT_algorithm* alg,_NT_jsonStream& st){
   for(int i=0;i<=last || i<d.count;++i){
    if(i>=kMaxSegments)break;
    char r[17*4+1];char* w=r;
-   if(d.seg[i].shape==kRandom || d.seg[i].shape==kSmoothRandom)
-    for(int j=0;j<17;++j){const uint16_t u=d.rnd[i][j];
+   const Segment& g=d.seg[i];
+   if((g.shape==kRandom || g.shape==kSmoothRandom) && g.randomRefresh){
+    const int used=clampi(g.randomSteps,1,16)+1;
+    for(int j=0;j<used;++j){const uint16_t u=d.rnd[i][j];
      *w++=kHex[(u>>12)&15];*w++=kHex[(u>>8)&15];*w++=kHex[(u>>4)&15];*w++=kHex[u&15];}
+   }
    *w=0;
    st.addString(r);
   }
@@ -1534,14 +1648,15 @@ static bool parsePattern(_NT_jsonParse& parse,StoredPattern* d,uint32_t& rng){
     if(!parse.string(str))return false;
     if(!d || !str || i>=kMaxSegments)continue;
     int len=0;while(str[len] && len<69)++len;
-    if(len!=68)continue;
+    if(len==0 || len>68 || (len&3))continue;
+    const int k=len/4;
     uint16_t vals[17];bool ok=true;
-    for(int j=0;j<17 && ok;++j){
+    for(int j=0;j<k && ok;++j){
      uint16_t u=0;
      for(int k=0;k<4;++k){const int h=hexValue(str[j*4+k]);if(h<0){ok=false;break;}u=static_cast<uint16_t>(u*16+h);}
      vals[j]=u;
     }
-    if(ok)for(int j=0;j<17;++j)d->rnd[i][j]=vals[j];
+    if(ok)for(int j=0;j<k;++j){__asm__ volatile("":::"memory");d->rnd[i][j]=vals[j];}
    }
   }
   else if(!parse.skipMember())return false;
@@ -1573,13 +1688,13 @@ static bool deserialise(_NT_algorithm* alg,_NT_jsonParse& parse){
   loadWorking(s,s->bank[current]);
   __atomic_store_n(&s->requestedPattern,-1,__ATOMIC_RELAXED);
   s->patternOverride=false;
-  s->pendingRandomRegeneration=0;
+  s->pendingRandomRegeneration=0;s->pendingRegenerateAll=0;
   s->pendingEditorSync=true;
  }
  return true;
 }
 static const _NT_factory kFactory={
- NT_MULTICHAR('S','L','F','2'),"Shape LFO","Shape LFO v0.10.0",
+ NT_MULTICHAR('S','L','F','2'),"Shape LFO","Shape LFO v0.11.1",
  0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
  draw,midiRealtime,nullptr,kNT_tagUtility,nullptr,nullptr,nullptr,
  serialise,deserialise,nullptr,nullptr,parameterString,nullptr
