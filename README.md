@@ -2,7 +2,7 @@
 
 Shape LFO is a clocked modulation sequencer for the Expert Sleepers disting NT. Instead of one repeating waveform, you build a **chain of up to 32 shape segments**. Each segment has its own waveform, length, repeats and sculpting. The chain can loop, ping-pong, fire once per trigger like an envelope, or step forward one segment per trigger, all in time with the internal tempo, a CV clock or MIDI clock. A second output turns the movement into gates and triggers. Sixteen patterns live in one Shape LFO, switchable in time by hand, CV or trigger, and everything is saved with your NT preset.
 
-Version 0.13.1
+Version 0.13.2
 
 ---
 

@@ -20,6 +20,8 @@ CXX="${CXX:-c++}"
 ./tests/quantize_test_bin
 "$CXX" -std=c++17 -O2 -Wall -Wextra -Itests/include tests/features_test.cpp -o tests/features_test_bin
 ./tests/features_test_bin
+"$CXX" -std=c++17 -O2 -Wall -Wextra -Itests/include tests/perf_test.cpp -o tests/perf_test_bin
+./tests/perf_test_bin
 # The same segment/zoom tests with an 8-segment window (logic must not depend on the size).
 "$CXX" -std=c++17 -O2 -Wall -Wextra -DSLFO_ZOOM_WINDOW=8 -Itests/include tests/segment_test.cpp -o tests/segment_test_zoom8_bin
 ./tests/segment_test_zoom8_bin

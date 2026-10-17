@@ -1,3 +1,17 @@
+# v0.13.2 — Faster sample loop, identical output
+
+No feature or sound changes. The per-sample code no longer re-derives settings that only change between segments or blocks:
+- Segment constants (repeats, Warp and Squish factors, Pinch envelope, Depth, Pinch height anchor) are worked out once when a segment starts, and refreshed after any playhead event.
+- Output constants (Voltage range, Amplitude, Offset, Morph amount) are read once per block.
+- The quantizer uses a per-block lookup table instead of searching six candidate notes every sample.
+- The shape and output code is now compiled inline in the sample loop (the ARM build no longer calls `shapedAt`/`scaleOutput` per sample). This also removes a per-sample division when Warp is used.
+
+Host benchmark (x86, a guide only, not an NT measurement): default pattern -24%, 32 busy segments with gate and slew -23%, plus quantizer -41%, plus Morph on every segment -39%.
+
+Output is unchanged. On the host build it is bit-identical: a new test (`perf_test`) compares the fast path with the reference transform at 3 million points across every shape, setting, Morph and all 6 scales x 12 roots; the full CV and gate output of six busy configurations (all gate modes, slew, quantizer, Morph, Ping-pong, CV clock with Mult/div) is byte-identical to v0.13.1; Loop CV is still byte-identical to v0.6.1. (On the NT, the ARM compiler fuses some multiply-adds, so values can differ in the last float bit, around a millionth of a volt; inaudible.)
+
+Tested: ten host suites + sanitizers, ARM GNU 14.2 compile with no runtime helpers. **Disting NT hardware test required (CPU reading).**
+
 # v0.13.1 — Menu reorganisation, random Morph to fix
 
 **Pages** (order chosen for the controls used most): **Edit, Pattern, Output, Gate, Clock, Routing, Chain**.

@@ -1,4 +1,4 @@
-// Shape LFO v0.13.1 scale quantizer, 32 segments, duplicate/delete, zoomed view, pattern bank + preset saving, gate output, play modes, external clock for Expert Sleepers disting NT
+// Shape LFO v0.13.2 scale quantizer, 32 segments, duplicate/delete, zoomed view, pattern bank + preset saving, gate output, play modes, external clock for Expert Sleepers disting NT
 // Copyright (c) 2026 intowhite. MIT license. https://github.com/intowhite/hyper-lfo
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -802,7 +802,7 @@ static inline float curvedStep(float t,int count,int contour,int curve) {
                        + (arch-level)*mix;
     return clampf(curved,-1.0f,1.0f);
 }
-static inline float waveform(int shape,float t,int curve=0,int width=50,
+static inline __attribute__((always_inline)) float waveform(int shape,float t,int curve=0,int width=50,
                              int stepCount=8,int contour=0) {
     t=clampf(t,0.0f,0.999999f);
     if(shape==kRampDown)return 1.0f-2.0f*bendRamp(t,curve);
@@ -970,6 +970,115 @@ static float scaleOutput(const ShapeLFO* s,float wave,float envelope,int slot) {
     if(scale>0 && scale<=6) {
         int root=s->v[pRoot];root=root<0?0:(root>11?11:root);
         volts=quantizeVolts(volts,scale,root);
+    }
+    return volts;
+}
+// ---- v0.13.2 fast path for step(). The same arithmetic as amplitudeAt /
+// shapedAt / scaleOutput, in the same order (no fast-math, no FP
+// contraction), so the output is bit-identical; only the per-sample
+// re-derivation of constants is gone. tests/perf_test.cpp checks equality.
+// Block constants: output scaling, Morph amount, quantizer table.
+struct BlockCache {
+    float center,radius,amp,offset;
+    float morphAmount;bool morphOn;
+    int scale,root;
+    int8_t below[12],above[12]; // nearest scale note at/below and above, per pitch class of floor
+};
+// Segment constants: refreshed when the playing segment changes or after
+// any playhead event (pattern switches can swap the segment data).
+struct SegCache {
+    float envStart,envDiff,depth;   // amplitudeAt
+    float repeats;                  // shapedAt
+    float squish;bool hasSquish;    // 0.9 * squish amount
+    float warpA,warpA1;bool hasWarp;// phaseWarp: a, a - 1
+    float base,centerMinusBase;     // scaleOutput anchor
+    int shape,morphTarget;          // morphTarget -1 = none
+    int curve,width,steps,contour;
+};
+static void fillBlockCache(const ShapeLFO* s,BlockCache& b) {
+    b.center=0.0f;b.radius=5.0f;
+    if(s->v[pRange]==1){b.center=2.5f;b.radius=2.5f;}
+    else if(s->v[pRange]==2){b.center=5.0f;b.radius=5.0f;}
+    b.amp=s->v[pAmplitude]*0.01f;
+    b.offset=s->v[pOffset]*0.001f;
+    const int amount=s->v[pMorph];
+    b.morphOn=amount>0;
+    b.morphAmount=static_cast<float>(amount>100?100:amount);
+    const int scale=s->v[pQuantize];
+    b.scale=(scale>0 && scale<=6)?scale:0;
+    int root=s->v[pRoot];root=root<0?0:(root>11?11:root);b.root=root;
+    if(b.scale) {
+        // For a floor note with pitch class pc (relative to Root), the
+        // nearest candidates are the highest scale note at offsets 0..-2 and
+        // the lowest at +1..+3 (the largest gap in these scales is 3).
+        const uint32_t mask=kScaleMasks[b.scale];
+        for(int pc=0;pc<12;++pc) {
+            int lo=0,hi=1;
+            for(int k=0;k>=-2;--k){if(mask&(1u<<((pc+k+12)%12))){lo=k;break;}}
+            for(int k=1;k<=3;++k){if(mask&(1u<<((pc+k)%12))){hi=k;break;}}
+            b.below[pc]=static_cast<int8_t>(lo);b.above[pc]=static_cast<int8_t>(hi);
+        }
+    }
+}
+static void fillSegCache(const ShapeLFO* s,const BlockCache& b,SegCache& c,int slot) {
+    const Segment& seg=s->segments[slot];
+    const float tilt=1.0f-clampf(static_cast<float>(seg.pinch)*0.01f,0.0f,1.0f);
+    c.depth=clampf(static_cast<float>(seg.depth)*0.01f,0.0f,1.0f);
+    const float start=(tilt<=0.5f)?1.0f:(2.0f-2.0f*tilt);
+    const float end=(tilt>=0.5f)?1.0f:(2.0f*tilt);
+    c.envStart=start;c.envDiff=end-start;
+    const int r=seg.repeats<1?1:(seg.repeats>8?8:seg.repeats);
+    c.repeats=static_cast<float>(r);
+    c.hasSquish=seg.squish!=0;
+    c.squish=0.9f*clampf(seg.squish*0.01f,-1.0f,1.0f);
+    c.hasWarp=(50+seg.warp)!=50;
+    const float skew=clampf((50+seg.warp)*0.01f,0.05f,0.95f);
+    c.warpA=(1.0f-skew)/skew;c.warpA1=c.warpA-1.0f;
+    c.base=b.center-b.radius*anchorAt(s,slot);
+    c.centerMinusBase=b.center-c.base;
+    c.shape=seg.shape;
+    c.morphTarget=seg.morphTo?seg.morphTo-1:-1;
+    c.curve=seg.curve;c.width=seg.width;c.steps=seg.steps;c.contour=seg.contour;
+}
+static inline __attribute__((always_inline)) float fastVolts(const ShapeLFO* s,const BlockCache& b,
+        const SegCache& c,int slot,float inside,float& envelopeOut) {
+    const float envelope=c.depth*(c.envStart+c.envDiff*inside);
+    envelopeOut=envelope;
+    float p=inside*c.repeats;
+    p-=static_cast<float>(static_cast<int>(p));
+    if(c.hasSquish) {
+        const float pos=clampf(p,0.0f,1.0f)*256.0f;
+        const int i=static_cast<int>(pos);
+        if(i<256) {
+            const float sine=kSineCycle[i]+(kSineCycle[i+1]-kSineCycle[i])*(pos-i);
+            p=p+c.squish*(sine*0.15915494309f);
+        }
+    }
+    if(c.hasWarp)p=(c.warpA*p)/(1.0f+c.warpA1*p);
+    p=clampf(p,0.0f,0.999999f);
+    float value=(c.shape==kRandom || c.shape==kSmoothRandom)
+      ?randomWave(s,slot,p,c.shape==kSmoothRandom)
+      :waveform(c.shape,p,c.curve,c.width,c.steps,c.contour);
+    if(c.morphTarget>=0 && b.morphOn) {
+        const int target=c.morphTarget;
+        const float other=(target==kRandom || target==kSmoothRandom)
+          ?randomWave(s,slot,p,target==kSmoothRandom)
+          :waveform(target,p,c.curve,c.width,c.steps,c.contour);
+        value+=(other-value)*b.morphAmount*0.01f;
+    }
+    const float wave=value*envelope;
+    float volts=c.base+b.amp*(b.radius*wave+c.centerMinusBase*envelope);
+    volts+=b.offset;
+    volts=clampf(volts,-10.0f,10.0f);
+    if(b.scale) {
+        const float semis=volts*12.0f;
+        int base=static_cast<int>(semis);
+        if(static_cast<float>(base)>semis)--base; // floor
+        int pc=(base-b.root)%12;if(pc<0)pc+=12;
+        const int lo=base+b.below[pc],hi=base+b.above[pc];
+        float dLo=semis-static_cast<float>(lo);if(dLo<0.0f)dLo=-dLo;
+        float dHi=semis-static_cast<float>(hi);if(dHi<0.0f)dHi=-dHi;
+        volts=static_cast<float>(dHi<dLo?hi:lo)*(1.0f/12.0f); // ties go down
     }
     return volts;
 }
@@ -1402,7 +1511,10 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     uint32_t events=s->events;s->events=0;
 #define SLFO_TO_P() do{p.ticks=ticks;p.slot=slot;p.threshold=threshold;p.invThreshold=invThreshold;}while(0)
 #define SLFO_FROM_P() do{ticks=p.ticks;slot=p.slot;threshold=p.threshold;invThreshold=p.invThreshold;\
-    holding=s->holding;reverse=s->reverse;events|=s->events;s->events=0;}while(0)
+    holding=s->holding;reverse=s->reverse;events|=s->events;s->events=0;cachedSlot=-1;}while(0)
+    // v0.13.2: constants for the fast path (see fastVolts).
+    BlockCache bc;fillBlockCache(s,bc);
+    SegCache sc;int cachedSlot=-1;
     const int slewChoice=s->v[pSlew];
     float maxSlew=0.0f;
     if(slewChoice>0 && slewChoice<kSlewCount) {
@@ -1467,9 +1579,10 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
             // Never reach 1.0: the repeat wrap would turn it back into 0.0
             // (a held One-shot end or a reversed segment start).
             if(fractional>0.999999f)fractional=0.999999f;
-            const float envelope=amplitudeAt(s,slot,fractional);
-            const float wave=shapedAt(s,slot,fractional,envelope);
-            float volts=scaleOutput(s,wave,envelope,slot);
+            if(slot!=cachedSlot){fillSegCache(s,bc,sc,slot);cachedSlot=slot;}
+            float envelope;
+            float volts=fastVolts(s,bc,sc,slot,fractional,envelope);
+            (void)envelope;
             if constexpr(decltype(tag)::value){gateSample(gb,s,i,volts,fractional,slot,events);events=0;}
             if(maxSlew>0.0f) {
                 if(!started) {previous=volts;started=true;}
@@ -1934,7 +2047,7 @@ static bool deserialise(_NT_algorithm* alg,_NT_jsonParse& parse){
  }
  return true;
 }
-#define SLFO_DESCRIPTION "Shape LFO v0.13.1"
+#define SLFO_DESCRIPTION "Shape LFO v0.13.2"
 static const _NT_factory kFactory={
  NT_MULTICHAR('S','L','F','2'),"Shape LFO",SLFO_DESCRIPTION,
  0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,
