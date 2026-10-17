@@ -48,7 +48,7 @@ Local build: `bash build.sh path/to/distingNT_API` (or `build.ps1 -ApiPath …` 
 - Parameter 8 (`pUnused8`) is the removed test oscillator: kept as a hidden placeholder (on no page, range 0-0) so later IDs do not move.
 - Mult/div: a unit is `5 × sampleRate × den` ticks (`thresholdFor`, computed in 64-bit and clamped); internal increment `8 × BPM × num`; external pulse span `unitsPerPulse × 5 × sampleRate × num`. x1 (num = den = 1) is the original arithmetic.
 - Segment has two fields outside the 16 saved bytes: `trigger` (Gate trigger) and `morphTo`; they are saved in the per-pattern `x` string.
-- EXPERIMENTAL code is marked in comments: chainer (`chainAdvance`, `pChain*`, Chain page, `chain` preset field) and morphing (`morphTo`, `pMorph*`, in `shapedAt`). To remove: delete those, keep the parameter slots as hidden placeholders like `pUnused8`.
+- Chainer (`chainAdvance`, `pChain*`, Chain page, `chain` preset field) and morphing (`morphTo`, `pMorph*`, in `shapedAt`/`fastVolts`) are standard features (their source comments still say EXPERIMENTAL from v0.13.0; harmless). The Chain page stays last.
 - Sample-loop fast path (v0.13.2): `step()` uses `fastVolts()` with a `BlockCache` (range, Amplitude, Offset, Morph, quantizer table; once per block) and a `SegCache` (per-segment constants; refilled when the slot changes and after every event helper via `SLFO_FROM_P`, since a pattern switch can swap segment data without changing the slot). It must stay **bit-identical** to `amplitudeAt` → `shapedAt` → `scaleOutput` (still used by the display): keep the same operation order and no fast-math. `perf_test` enforces this on the host build. Note: the ARM build (GCC 14.2, Cortex-M7) fuses some multiply-adds (`vfma`) even in `-std=c++17` mode, so on the NT the fast path and the display transform can differ in the last float bit (~1 µV); that is expected and harmless. Host results are exact; if you change the reference transform, change `fastVolts` too.
 - Avoid 64-bit integer division and libm on the target (the loader may not provide the helpers).
 
@@ -63,7 +63,7 @@ Local build: `bash build.sh path/to/distingNT_API` (or `build.ps1 -ApiPath …` 
 
 ## Status
 
-- v0.13.2: faster sample loop (cached constants, inline fast path, quantizer table); output bit-identical. Host + ARM validated. Awaiting NT CPU reading.
+- v0.13.2: faster sample loop (cached constants, inline fast path, quantizer table); output bit-identical. **Reported working on hardware. Current release.**
 - v0.13.1: menu reorganisation (Gate page, Output higher, Edit order), Morph to shows its controls, random Morph to target refreshes. Host + ARM validated. Awaiting NT hardware test.
 - v0.13.0: Gate trigger, Mult/div, Step loop, Init pattern, experimental chainer + morphing, test oscillator removed, names cleaned. Host + ARM validated. Awaiting NT hardware test.
 - v0.12.1: 4-segment zoom made standard (chosen on hardware).
