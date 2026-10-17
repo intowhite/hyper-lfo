@@ -10,9 +10,10 @@ Most LFOs repeat one shape forever. Shape LFO lets you **chain up to 32 shapes i
 
 - **32-segment shape chains:** ramps, sine, triangle, square, highs and lows, staircases and random, each with its own length and repeats
 - **Sculpt every segment:** Curve, Pinch, Pinch height, Depth, Warp and Squish
-- **Morph** any segment toward a second shape with one knob or CV *(experimental)*
+- **Morph** any segment toward a second shape with one knob or CV
 - **Five play modes:** Loop, One-shot envelope, Step advance, Step loop and Ping-pong
 - **16 patterns per instance:** switch by knob, CV or trigger, always landing on the beat
+- **Pattern chainer:** play your patterns in a sequence of up to 8 steps, each repeated as many times as you like
 - **Random that behaves:** new values every pass, or a locked phrase you can regenerate on the next bar
 - **Gate and trigger output:** threshold gates, crossings, per-segment and ratchet triggers, end-of-pattern
 - **Scale quantizer:** Major, Minor, pentatonics, Dorian and Mixolydian in any key, with glide
@@ -53,7 +54,11 @@ Turn **Edit segment** to choose a segment, then change its **Shape**, **Duration
 - Thin vertical lines mark segment boundaries. The **selected segment** is outlined.
 - A vertical **playhead** shows the current position.
 - **Patterns of more than 4 segments** zoom in: the screen shows **4 segments around Edit segment**, so turning Edit segment scrolls through the pattern. A thin **overview strip** along the top shows the whole pattern, with a bracket marking the part on screen and a tick for the playhead, which stays visible there even when the playhead is outside the window.
-- **Bottom left:** the playing pattern (`P3`, or `P3>5` while a switch to pattern 5 is waiting for the pattern start; `C2` shows the chain step when the experimental chainer is on), then the pattern length (for example `1 Bar` or `1 Bar 2 Beats`). With an external clock it also shows the clock status: `CV 120` or `MIDI 120` for the measured tempo, `--` when no clock is arriving, `MIDI STOP` after a MIDI Stop.
+- **Bottom left:**
+  - the playing pattern: `P3`, or `P3>5` while a switch to pattern 5 waits for the downbeat
+  - `C2` when the pattern chainer is on (the chain step)
+  - the pattern length, for example `1 Bar` or `1 Bar 2 Beats`
+  - with an external clock, the clock status: `CV 120` or `MIDI 120` for the measured tempo, `--` when no clock is arriving, `MIDI STOP` after a MIDI Stop
 - A **dotted line** shows the gate threshold when the gate output is assigned and in a threshold mode.
 - **Bottom right:** the play mode (when it is not Loop: `1SHOT`, `STEP`, `PING` or `SLOOP`), then the selected segment, its repeats and timing mode, for example `S2 x4 REL`.
 
@@ -79,7 +84,7 @@ Every control on this page applies to the **selected segment only**. The page sh
 | **Pinch height** | Down 100% … Center … Up 100% | The voltage the shape shrinks toward when pinched or turned down: the top, the middle or the bottom of the output range. |
 | **Warp** | −45 to +45 | Pushes the shape's timing earlier or later within each repeat, without changing the segment's length. |
 | **Squish** | −100% to +100% | Compresses and stretches time smoothly within each repeat, for a swung or lopsided feel. |
-| **Morph to** | Off or any shape | *Experimental.* A second shape this segment blends toward as the Pattern page's **Morph** control is turned up. See *Morphing*. |
+| **Morph to** | Off or any shape | A second shape this segment blends toward as the Pattern page's **Morph** control is turned up. See *Morphing*. |
 | **Gate trigger** | On / Off | Shown when the gate output is in Segment start or Every repeat mode. Off silences the gate for this segment, turning the gate into a trigger sequencer that follows your shapes. |
 | **Duplicate segment** | confirm | Inserts a copy of the selected segment right after it (the following segments move along one place) and selects the copy, ready to edit. Not available when the pattern already has 32 segments. |
 | **Delete segment** | confirm | Removes the selected segment; the following segments move back to close the gap. The last remaining segment cannot be deleted. |
@@ -139,7 +144,7 @@ When Shape is Random or Smooth random, these controls appear directly under Shap
 | **Gate** | Gate out, Gate mode, Gate threshold, Gate out mode |
 | **Clock** | Clock source, Internal BPM, Mult/div, Clock PPQN |
 | **Routing** | CV out, CV out mode, Gate out, Gate out mode, Clock in, Reset in, Trigger in, Pattern CV in, Next pattern in, Regenerate in |
-| **Chain** | *Experimental:* Chain, Chain length, Chain step, Step pattern, Step repeats |
+| **Chain** | Chain, Chain length, Chain step, Step pattern, Step repeats |
 
 ---
 
@@ -151,7 +156,7 @@ When Shape is Random or Smooth random, these controls appear directly under Shap
 | **Play mode** | Loop, One-shot, Step advance, Ping-pong, Step loop | How the pattern plays. See below. |
 | **Segments** | 1–32 | How many segments play. Lowering it hides the segments at the end without erasing them, so raising it again brings them back. |
 | **Base division** | 1/32 … 1 bar, with triplets | The note value that "Follow base" segments are measured in. Default 1/4. |
-| **Morph** | 0–100% | *Experimental.* How far every segment with a **Morph to** shape has blended toward it. Map it to a CV input for movement. |
+| **Morph** | 0–100% | How far every segment with a **Morph to** shape has blended toward it. Map it to a CV input for movement. |
 | **Regenerate all** | confirm | New values for every Random and Smooth random segment, together, at the next pattern start. |
 | **Pattern loop start** / **Pattern loop end** | 1–16 / 1–16 | The patterns that **Next pattern in** steps through. Each trigger moves to the next pattern in the range and wraps back to the start; set 1 and 2 to flip between two patterns. Default 1–16. |
 | **Copy to** / **Copy pattern** | 1–16 / confirm | Copies the playing pattern, with all its settings, into another pattern slot. |
@@ -286,15 +291,23 @@ All inputs respond to signals rising above 1 V and must fall below 0.5 V before 
 
 ---
 
-## Experimental features
+## Morphing
 
-These two are for trying out and may change or be removed before 1.0. Patches that use them may not load the same way in a later version.
+Morphing blends a segment from its own shape into a second one.
 
-### Morphing
+1. On the Edit page, give a segment a **Morph to** shape.
+2. On the Pattern page, turn up **Morph**: 0% is the segment's own shape, 100% is the Morph to shape.
 
-Give a segment a **Morph to** shape on the Edit page, then turn up **Morph** on the Pattern page: the segment blends from its own shape toward the Morph to shape. 0% is the original shape, 100% is the Morph to shape, and every segment with a Morph to shape follows the same Morph control. Map **Morph** to a CV input (NT parameter mapping) to sweep it with an LFO or envelope. The blend uses the segment's own Curve, Pulse width, Steps, Contour and random values for both shapes; the controls the Morph to shape needs appear on the Edit page. A Random or Smooth random Morph to target follows **Refresh** like a Random segment: new values each time the segment starts in Free, or held values (with Regenerate) in Loop. Morphing costs extra CPU while Morph is above 0.
+- Every segment with a Morph to shape follows the same Morph control, so one knob can transform the whole pattern.
+- Map **Morph** to a CV input (NT parameter mapping) and sweep it with an LFO or envelope.
+- Both shapes share the segment's Curve, Pulse width, Steps, Contour and random values. The controls the Morph to shape needs appear on the Edit page.
+- A Random or Smooth random Morph to shape follows **Refresh** just like a Random segment. Random morphing to Smooth random turns Morph into a smoothness control.
 
-### Pattern chainer (Chain page)
+---
+
+## Pattern chainer (Chain page)
+
+Play your patterns in a set order, like a song.
 
 | Control | What it does |
 |---|---|
@@ -303,7 +316,12 @@ Give a segment a **Morph to** shape on the Edit page, then turn up **Morph** on 
 | **Chain step** | Which step you are editing. |
 | **Step pattern** / **Step repeats** | The pattern for that step and how many whole passes it plays (1–16). |
 
-The chain switches patterns at pattern starts, like every other pattern change. Reset (or MIDI Start) goes back to step 1. While the chain runs it decides the pattern; Pattern CV and Next pattern changes are overridden at the chain's next step. The display shows the chain step as `C2`.
+- The chain switches patterns on the downbeat, like every other pattern change.
+- Reset (or MIDI Start) goes back to step 1.
+- While the chain runs, it chooses the pattern: Pattern CV and Next pattern changes give way at the chain's next step.
+- The display shows the current chain step, for example `C2`.
+
+---
 
 ## Tips
 
@@ -330,7 +348,7 @@ All 16 patterns are saved inside your disting NT preset, along with every other 
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for what is planned before and after version 1.0.
+See [ROADMAP.md](ROADMAP.md) for what's coming next.
 
 ## Issues and feedback
 
