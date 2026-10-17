@@ -2,7 +2,7 @@
 
 Shape LFO is a clocked modulation sequencer for the Expert Sleepers disting NT. Instead of one repeating waveform, you build a **chain of up to 32 shape segments**. Each segment has its own waveform, length, repeats and sculpting. The chain can loop, ping-pong, fire once per trigger like an envelope, or step forward one segment per trigger, all in time with the internal tempo, a CV clock or MIDI clock. A second output turns the movement into gates and triggers. Sixteen patterns live in one Shape LFO, switchable in time by hand, CV or trigger, and everything is saved with your NT preset.
 
-Version 0.13.0
+Version 0.13.1
 
 ---
 
@@ -43,21 +43,22 @@ Turn **Edit segment** to choose a segment, then change its **Shape**, **Duration
 
 ## Edit page: shaping a segment
 
-Every control on this page applies to the **selected segment only**. The page shows just the controls that apply to the current shape.
+Every control on this page applies to the **selected segment only**. The page shows just the controls that apply to the current shape, plus those its **Morph to** shape needs (for example, Morph to Square adds Pulse width).
 
 | Control | Range | What it does |
 |---|---|---|
 | **Edit segment** | 1–32 | Chooses which segment you are editing. |
 | **Shape** | see below | The segment's waveform. |
-| **Duration** | see Timing | Length of the segment, including all of its repeats. |
-| **Timing** | Follow base / Fixed note | How Duration is set. See *Timing*. |
-| **Repeats** | 1–8 | How many times the shape plays within that duration. |
+| **Refresh** / **Regenerate segment** / **Random steps** | see *Random segments* | Random and Smooth random only. |
 | **Pulse width** | 5–95% | Square only. |
 | **Steps** / **Contour** | 2–16 / Up, Down, Hump, Valley | Steps only. The number of stairs and the staircase's overall direction. |
 | **Curve** | −100 to +100 | Ramps and Steps. See *Curve* below. |
+| **Duration** | see Timing | Length of the segment, including all of its repeats. |
+| **Repeats** | 1–8 | How many times the shape plays within that duration. |
+| **Timing** | Follow base / Fixed note | How Duration is set. See *Timing*. |
+| **Depth** | 0–100% | The segment's own level. |
 | **Pinch** | Left 100% … None … Right 100% | Fades the segment's amplitude in (Left) or out (Right) across the segment, continuously through all of its repeats. |
 | **Pinch height** | Down 100% … Center … Up 100% | The voltage the shape shrinks toward when pinched or turned down: the top, the middle or the bottom of the output range. |
-| **Depth** | 0–100% | The segment's own level. |
 | **Warp** | −45 to +45 | Pushes the shape's timing earlier or later within each repeat, without changing the segment's length. |
 | **Squish** | −100% to +100% | Compresses and stretches time smoothly within each repeat, for a swung or lopsided feel. |
 | **Morph to** | Off or any shape | *Experimental.* A second shape this segment blends toward as the Pattern page's **Morph** control is turned up. See *Morphing*. |
@@ -98,7 +99,7 @@ Triplet lengths are exact, so straight and triplet segments stay locked together
 
 ## Random segments
 
-When Shape is Random or Smooth random, these controls appear directly under Shape:
+When Shape is Random or Smooth random, these controls appear directly under Shape. They also appear when **Morph to** is Random or Smooth random, and then control the Morph to target's random values. (A Random segment can morph to Smooth random: the Morph control then sets how smoothly the same values glide.)
 
 | Control | What it does |
 |---|---|
@@ -115,10 +116,11 @@ When Shape is Random or Smooth random, these controls appear directly under Shap
 | Page | Contents |
 |---|---|
 | **Edit** | Everything about the selected segment (see above). |
-| **Pattern** | Pattern, Segments, Play mode, Base division, Morph, Regenerate all, Pattern loop start, Pattern loop end, Copy to, Copy pattern, Init pattern |
+| **Pattern** | Pattern, Play mode, Segments, Base division, Morph, Regenerate all, Pattern loop start, Pattern loop end, Copy to, Copy pattern, Init pattern |
+| **Output** | Voltage range, Amplitude, Offset, Output slew, Quantize, Root |
+| **Gate** | Gate out, Gate mode, Gate threshold, Gate out mode |
 | **Clock** | Clock source, Internal BPM, Mult/div, Clock PPQN |
-| **Output** | Voltage, Amplitude, Offset, Quantize, Root, Output slew, Gate out, Gate mode, Gate threshold |
-| **Routing** | CV out, CV out mode, Gate out, Gate out mode, Clock in, Reset in, Trigger in, Regenerate in, Pattern CV in, Next pattern in |
+| **Routing** | CV out, CV out mode, Gate out, Gate out mode, Clock in, Reset in, Trigger in, Pattern CV in, Next pattern in, Regenerate in |
 | **Chain** | *Experimental:* Chain, Chain length, Chain step, Step pattern, Step repeats |
 
 ---
@@ -128,8 +130,8 @@ When Shape is Random or Smooth random, these controls appear directly under Shap
 | Control | Range | What it does |
 |---|---|---|
 | **Pattern** | 1–16 | The pattern that plays and that you edit. Changing it switches at the next pattern start. |
-| **Segments** | 1–32 | How many segments play. Lowering it hides the segments at the end without erasing them, so raising it again brings them back. |
 | **Play mode** | Loop, One-shot, Step advance, Ping-pong, Step loop | How the pattern plays. See below. |
+| **Segments** | 1–32 | How many segments play. Lowering it hides the segments at the end without erasing them, so raising it again brings them back. |
 | **Base division** | 1/32 … 1 bar, with triplets | The note value that "Follow base" segments are measured in. Default 1/4. |
 | **Morph** | 0–100% | *Experimental.* How far every segment with a **Morph to** shape has blended toward it. Map it to a CV input for movement. |
 | **Regenerate all** | confirm | New values for every Random and Smooth random segment, together, at the next pattern start. |
@@ -176,6 +178,56 @@ To build a new pattern from an existing one, select the source pattern, set **Co
 
 ---
 
+## Output page
+
+| Control | Range | What it does |
+|---|---|---|
+| **Voltage range** | −5 to +5 V, 0 to 5 V, 0 to 10 V | CV output range. |
+| **Amplitude** | 0–100% | Overall level. The waveform shrinks toward each segment's Pinch height point. |
+| **Offset** | −5 V to +5 V | Added to the CV output. |
+| **Output slew** | Off, 1 ms … 1000 ms | Smooths jumps such as square edges, steps and random changes. |
+| **Quantize** | Off, Major, Minor, Major pent, Minor pent, Dorian, Mixolydian | Snaps the CV output to the notes of a scale (1 V/octave). Off by default. |
+| **Root** | C … B | The key of the scale. 0 V is C. |
+
+### Quantize
+
+With **Quantize** on, the CV output becomes a melody: every voltage is snapped to the nearest note of the chosen scale, in **Root**'s key, at 1 V per octave with 0 V = C. Steps and Random segments become note sequences; ramps and sines become runs and arpeggios.
+
+- Turn **Amplitude** down to choose the note range. The full ±5 V range covers 10 octaves; 10–20% (1–2 octaves) is a good starting point. **Offset** moves the range up or down.
+- **Output slew** comes after the quantizer, so it becomes a glide between notes.
+- The display and the gate output use the quantized voltage, so what you see is what comes out.
+- For other scales or microtonal tunings, leave Quantize off and use the NT's own Quantizer algorithm after Shape LFO.
+
+---
+
+## Gate page
+
+The second output turns the movement into gates and triggers. Assign **Gate out** here or on the Routing page (it is off by default). Gates and triggers are 5 V; triggers last 10 ms.
+
+| Control | Range | What it does |
+|---|---|---|
+| **Gate out** | None or any output | Where the gate/trigger output goes. The same setting also appears on the Routing page. |
+| **Gate mode** | see below | What the gate output does. |
+| **Gate threshold** | 0–100% | Where the threshold modes switch, as a percentage of the Voltage range: 0% is the bottom, 50% (default) the middle, 100% the top. |
+| **Gate out mode** | Replace / Add | Replace or add to whatever is already on that bus. Also on the Routing page. |
+
+| Gate mode | Output |
+|---|---|
+| **Above** (default) | Gate high while the CV is above the threshold. |
+| **Below** | Gate high while the CV is below the threshold. |
+| **Rising** | Trigger each time the CV crosses the threshold going up. |
+| **Falling** | Trigger each time it crosses going down. |
+| **Both** | Trigger on every crossing. |
+| **Segment start** | Trigger at the start of every segment whose **Gate trigger** (Edit page) is On. |
+| **Every repeat** | Trigger at the start of every repeat, so a segment with 4 repeats gives 4 triggers (ratchets). Also follows each segment's **Gate trigger**. |
+| **Pattern end** | Trigger when a pass finishes: once per loop in Loop, when the shot ends in One-shot, after the last segment in Step advance, and once per full cycle in Ping-pong. |
+
+- The threshold modes compare the CV before Output slew, which is the curve drawn on the display. The **dotted line** shows the threshold.
+- A small hysteresis band (2% of the range) is built in, so a shape that sits on or wobbles around the threshold can't chatter.
+- **Pattern end** is the end-of-cycle trigger for One-shot. Use it to chain envelopes or to fire another Shape LFO.
+
+---
+
 ## Clock page
 
 | Control | Options | What it does |
@@ -199,50 +251,6 @@ Assign the clock and reset inputs on the **Routing** page.
 
 ---
 
-## Output page
-
-| Control | Range | What it does |
-|---|---|---|
-| **Voltage range** | −5 to +5 V, 0 to 5 V, 0 to 10 V | CV output range. |
-| **Amplitude** | 0–100% | Overall level. The waveform shrinks toward each segment's Pinch height point. |
-| **Offset** | −5 V to +5 V | Added to the CV output. |
-| **Quantize** | Off, Major, Minor, Major pent, Minor pent, Dorian, Mixolydian | Snaps the CV output to the notes of a scale (1 V/octave). Off by default. |
-| **Root** | C … B | The key of the scale. 0 V is C. |
-| **Output slew** | Off, 1 ms … 1000 ms | Smooths jumps such as square edges, steps and random changes. |
-| **Gate out** | None or any output | Where the gate/trigger output goes. The same setting also appears on the Routing page. |
-| **Gate mode** | see below | What the gate output does. |
-| **Gate threshold** | 0–100% | Where the threshold modes switch, as a percentage of the Voltage range: 0% is the bottom, 50% (default) the middle, 100% the top. |
-
-### Quantize
-
-With **Quantize** on, the CV output becomes a melody: every voltage is snapped to the nearest note of the chosen scale, in **Root**'s key, at 1 V per octave with 0 V = C. Steps and Random segments become note sequences; ramps and sines become runs and arpeggios.
-
-- Turn **Amplitude** down to choose the note range. The full ±5 V range covers 10 octaves; 10–20% (1–2 octaves) is a good starting point. **Offset** moves the range up or down.
-- **Output slew** comes after the quantizer, so it becomes a glide between notes.
-- The display and the gate output use the quantized voltage, so what you see is what comes out.
-- For other scales or microtonal tunings, leave Quantize off and use the NT's own Quantizer algorithm after Shape LFO.
-
-### Gate/trigger output
-
-Assign **Gate out** here or on the Routing page (it is off by default). Gates and triggers are 5 V; triggers last 10 ms.
-
-| Gate mode | Output |
-|---|---|
-| **Above** (default) | Gate high while the CV is above the threshold. |
-| **Below** | Gate high while the CV is below the threshold. |
-| **Rising** | Trigger each time the CV crosses the threshold going up. |
-| **Falling** | Trigger each time it crosses going down. |
-| **Both** | Trigger on every crossing. |
-| **Segment start** | Trigger at the start of every segment whose **Gate trigger** (Edit page) is On. |
-| **Every repeat** | Trigger at the start of every repeat, so a segment with 4 repeats gives 4 triggers (ratchets). Also follows each segment's **Gate trigger**. |
-| **Pattern end** | Trigger when a pass finishes: once per loop in Loop, when the shot ends in One-shot, after the last segment in Step advance, and once per full cycle in Ping-pong. |
-
-- The threshold modes compare the CV before Output slew, which is the curve drawn on the display. The **dotted line** shows the threshold.
-- A small hysteresis band (2% of the range) is built in, so a shape that sits on or wobbles around the threshold can't chatter.
-- **Pattern end** is the end-of-cycle trigger for One-shot. Use it to chain envelopes or to fire another Shape LFO.
-
----
-
 ## Routing page
 
 | Control | What it does |
@@ -252,9 +260,9 @@ Assign **Gate out** here or on the Routing page (it is off by default). Gates an
 | **Clock in** | Input for a CV clock (when Clock source is CV clock). |
 | **Reset in** | Restarts the pattern from segment 1. |
 | **Trigger in** | Fires One-shot and Step advance. |
-| **Regenerate in** | Does the same as Regenerate all on each trigger. |
 | **Pattern CV in** | Selects the pattern: one semitone per pattern from 0 V. |
 | **Next pattern in** | Moves to the next pattern on each trigger, within Pattern loop start–end. |
+| **Regenerate in** | Does the same as Regenerate all on each trigger. |
 
 All inputs respond to signals rising above 1 V and must fall below 0.5 V before the next trigger counts, so a held gate counts only once.
 
@@ -266,7 +274,7 @@ These two are for trying out and may change or be removed before 1.0. Patches th
 
 ### Morphing
 
-Give a segment a **Morph to** shape on the Edit page, then turn up **Morph** on the Pattern page: the segment blends from its own shape toward the Morph to shape. 0% is the original shape, 100% is the Morph to shape, and every segment with a Morph to shape follows the same Morph control. Map **Morph** to a CV input (NT parameter mapping) to sweep it with an LFO or envelope. The blend uses the segment's own Curve, Width, Steps, Contour and random values for both shapes. Morphing costs extra CPU while Morph is above 0.
+Give a segment a **Morph to** shape on the Edit page, then turn up **Morph** on the Pattern page: the segment blends from its own shape toward the Morph to shape. 0% is the original shape, 100% is the Morph to shape, and every segment with a Morph to shape follows the same Morph control. Map **Morph** to a CV input (NT parameter mapping) to sweep it with an LFO or envelope. The blend uses the segment's own Curve, Pulse width, Steps, Contour and random values for both shapes; the controls the Morph to shape needs appear on the Edit page. A Random or Smooth random Morph to target follows **Refresh** like a Random segment: new values each time the segment starts in Free, or held values (with Regenerate) in Loop. Morphing costs extra CPU while Morph is above 0.
 
 ### Pattern chainer (Chain page)
 
@@ -304,7 +312,7 @@ All 16 patterns are saved inside your disting NT preset, along with every other 
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for planned features: saving patterns with presets, segment duplicate/delete, pattern banks, pattern chaining, clock multiply/divide and scale quantize.
+See [ROADMAP.md](ROADMAP.md) for what is planned before and after version 1.0.
 
 ## Issues and feedback
 

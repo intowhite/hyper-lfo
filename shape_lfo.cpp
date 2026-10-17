@@ -1,4 +1,4 @@
-// Shape LFO v0.13.0 scale quantizer, 32 segments, duplicate/delete, zoomed view, pattern bank + preset saving, gate output, play modes, external clock for Expert Sleepers disting NT
+// Shape LFO v0.13.1 scale quantizer, 32 segments, duplicate/delete, zoomed view, pattern bank + preset saving, gate output, play modes, external clock for Expert Sleepers disting NT
 // Copyright (c) 2026 intowhite. MIT license. https://github.com/intowhite/hyper-lfo
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -185,7 +185,8 @@ static const _NT_parameter kSharedDefaults[pCount]={
  {"Init pattern",0,1,0,kNT_unitConfirm,0,nullptr}
 };
 // Edit is the first page so the NT opens on "Edit segment" when loaded.
-enum PageIndex { kPageEdit=0,kPagePattern,kPageClock,kPageOutput,kPageRouting,
+// v0.13.1 order: what you touch most comes first (80/20).
+enum PageIndex { kPageEdit=0,kPagePattern,kPageOutput,kPageGate,kPageClock,kPageRouting,
                  kPageChain, // EXPERIMENTAL chainer, last so it is easy to remove
                  kPageCount };
 struct Segment {
@@ -303,27 +304,27 @@ struct ShapeLFO : public _NT_algorithm {
   segments[3].shape=kRampUp;
   parameters=kSharedDefaults;v=nullptr;vIncludingCommon=nullptr;
   // v0.9.0 layout: each page has one job. All inputs/outputs on Routing.
-  static const uint8_t patternParams[]={pPattern,pSegments,pPlayMode,pBaseDivision,pMorph,
+  static const uint8_t patternParams[]={pPattern,pPlayMode,pSegments,pBaseDivision,pMorph,
                                         pRegenerateAll,pNextRangeStart,pNextRangeEnd,
                                         pCopyTo,pCopyPattern,pInitPattern};
+  static const uint8_t outputParams[]={pRange,pAmplitude,pOffset,pSlew,pQuantize,pRoot};
+  // Gate out / Gate out mode appear on Gate AND on Routing; one parameter each.
+  static const uint8_t gateParams[]={pGateOut,pGateMode,pGateThreshold,pGateOutputMode};
   static const uint8_t clockParams[]={pClockSource,pBpm,pClockRatio,pClockRate};
-  // Gate out appears here (next to its settings) AND on Routing; it is
-  // the same parameter on both pages.
-  static const uint8_t outputParams[]={pRange,pAmplitude,pOffset,pQuantize,pRoot,pSlew,
-                                       pGateOut,pGateMode,pGateThreshold};
   static const uint8_t routingParams[]={pOutput,pOutputMode,pGateOut,pGateOutputMode,pClockIn,
-                                        pResetIn,pTriggerIn,pRegenerateIn,pPatternCvIn,
-                                        pNextPatternIn};
+                                        pResetIn,pTriggerIn,pPatternCvIn,pNextPatternIn,
+                                        pRegenerateIn};
   // Populate the Edit page before the NT's very first UI draw. No
   // callback can rely on v[] until the host has attached its values.
-  const uint8_t initialEdit[]={pSelected,pShape,pRelDuration,pTiming,pRepeats,pCurve,
-      pPinch,pHeight,pDepth,pWarp,pSquish,pDuplicateSegment,pDeleteSegment,pReset,pEditCount};
-  for(int i=0;i<15;++i)editParams[i]=initialEdit[i];
-  pages[kPageEdit]={"Edit",15,0,{0,0},editParams};
+  const uint8_t initialEdit[]={pSelected,pShape,pCurve,pRelDuration,pRepeats,pTiming,
+      pDepth,pPinch,pHeight,pWarp,pSquish,pMorphTo,pDuplicateSegment,pDeleteSegment,pReset,pEditCount};
+  for(int i=0;i<16;++i)editParams[i]=initialEdit[i];
+  pages[kPageEdit]={"Edit",16,0,{0,0},editParams};
   static const uint8_t chainParams[]={pChain,pChainLength,pChainStep,pChainPattern,pChainRepeats};
   pages[kPagePattern]={"Pattern",11,0,{0,0},patternParams};
+  pages[kPageOutput]={"Output",6,0,{0,0},outputParams};
+  pages[kPageGate]={"Gate",4,0,{0,0},gateParams};
   pages[kPageClock]={"Clock",4,0,{0,0},clockParams};
-  pages[kPageOutput]={"Output",9,0,{0,0},outputParams};
   pages[kPageRouting]={"Routing",10,0,{0,0},routingParams};
   pages[kPageChain]={"Chain",5,0,{0,0},chainParams};
   pageSet={kPageCount,pages};parameterPages=&pageSet;
@@ -363,29 +364,38 @@ static void setHostParam(ShapeLFO* s,int param,int value){
 static void updateEditPage(ShapeLFO* s,bool informHost){
  int next=0;
  const Segment& g=s->segments[selected(s)];
+ // A shape's own controls show when the Shape OR the Morph to target uses
+ // them, so a morph target is never left with hidden settings.
+ const int a=g.shape,b=g.morphTo?g.morphTo-1:-1;
+ auto uses=[&](int shape){return a==shape || b==shape;};
+ const bool random=uses(kRandom) || uses(kSmoothRandom);
+ const bool steps=uses(kSteps);
+ const bool curve=steps || uses(kRampDown) || uses(kRampUp);
  s->editParams[next++]=pSelected;
  s->editParams[next++]=pShape;
- // Random controls sit directly under Shape: Refresh, Regenerate, steps.
- if(g.shape==kRandom || g.shape==kSmoothRandom){
+ // 1. The shape's own controls, directly under Shape.
+ if(random){
   s->editParams[next++]=pRandomRefresh;
   // Free already rerolls on every entry; Regenerate only matters in Loop.
   if(g.randomRefresh)s->editParams[next++]=pRegenerateSegment;
   s->editParams[next++]=pRandomSteps;
  }
+ if(uses(kSquare))s->editParams[next++]=pWidth;
+ if(steps){s->editParams[next++]=pSteps;s->editParams[next++]=pContour;}
+ if(curve)s->editParams[next++]=pCurve;
+ // 2. Timing.
  s->editParams[next++]=g.timing?pFixedDuration:pRelDuration;
- s->editParams[next++]=pTiming; // decides what Duration means, so next to it
  s->editParams[next++]=pRepeats;
- if(g.shape==kSquare)s->editParams[next++]=pWidth;
- else if(g.shape==kSteps){
-  s->editParams[next++]=pSteps;s->editParams[next++]=pContour;s->editParams[next++]=pCurve;
- }else if(g.shape==kRampDown || g.shape==kRampUp)s->editParams[next++]=pCurve;
- s->editParams[next++]=pMorphTo; // EXPERIMENTAL
- s->editParams[next++]=pPinch;s->editParams[next++]=pHeight;s->editParams[next++]=pDepth;
+ s->editParams[next++]=pTiming;
+ // 3. Level, then time shaping.
+ s->editParams[next++]=pDepth;s->editParams[next++]=pPinch;s->editParams[next++]=pHeight;
  s->editParams[next++]=pWarp;s->editParams[next++]=pSquish;
- // Gate trigger only matters while the gate fires on segments/repeats.
+ // 4. Morph to (EXPERIMENTAL), then Gate trigger when it matters.
+ s->editParams[next++]=pMorphTo;
  if(s->v && s->v[pGateOut]>0 &&
     (s->v[pGateMode]==kGateSegment || s->v[pGateMode]==kGateRepeat))
   s->editParams[next++]=pSegmentTrigger;
+ // 5. Segment actions.
  s->editParams[next++]=pDuplicateSegment;s->editParams[next++]=pDeleteSegment;
  s->editParams[next++]=pReset;s->editParams[next++]=pEditCount;
  s->pages[kPageEdit].numParams=static_cast<uint8_t>(next);
@@ -517,7 +527,13 @@ static void parameterChanged(_NT_algorithm* alg,int param){
  }
  if(param==pPattern){if(!s->syncingPattern)requestPattern(s,s->v[pPattern]-1);return;}
  if(param==pInitPattern){if(s->v[pInitPattern])s->initPending=true;return;}
- if(param==pSegmentTrigger || param==pMorphTo){if(!s->syncingEditor)pullEditorValue(s,param);return;}
+ if(param==pSegmentTrigger || param==pMorphTo){
+  if(!s->syncingEditor){
+   pullEditorValue(s,param);
+   if(param==pMorphTo)updateEditPage(s,true); // target's controls appear/disappear
+  }
+  return;
+ }
  // Showing/hiding Gate trigger on the Edit page follows the gate setup.
  if(param==pGateOut || param==pGateMode){updateEditPage(s,true);return;}
  // EXPERIMENTAL chainer step editor.
@@ -850,7 +866,11 @@ static void regenerateRandom(ShapeLFO* s,int slot){
   s->randomValues[slot][i]=static_cast<float>(x&65535u)/32767.5f-1.0f;
  }
 }
+static inline bool isRandomShape(int shape){return shape==kRandom || shape==kSmoothRandom;}
+// A segment uses its random table if its Shape OR its Morph to target is
+// Random / Smooth random (Free refresh, Regenerate and saving all follow).
 static inline bool randomShape(const Segment& seg){
+ if(seg.morphTo && isRandomShape(seg.morphTo-1))return true;
  return seg.shape==kRandom || seg.shape==kSmoothRandom;
 }
 // Free mode is regenerated at segment entry (a quantized boundary).
@@ -1775,7 +1795,7 @@ static void serialise(_NT_algorithm* alg,_NT_jsonStream& st){
    if(i>=kMaxSegments)break;
    char r[17*4+1];char* w=r;
    const Segment& g=d.seg[i];
-   if((g.shape==kRandom || g.shape==kSmoothRandom) && g.randomRefresh){
+   if(randomShape(g) && g.randomRefresh){
     const int used=clampi(g.randomSteps,1,16)+1;
     for(int j=0;j<used;++j){const uint16_t u=d.rnd[i][j];
      *w++=kHex[(u>>12)&15];*w++=kHex[(u>>8)&15];*w++=kHex[(u>>4)&15];*w++=kHex[u&15];}
@@ -1914,7 +1934,7 @@ static bool deserialise(_NT_algorithm* alg,_NT_jsonParse& parse){
  }
  return true;
 }
-#define SLFO_DESCRIPTION "Shape LFO v0.13.0"
+#define SLFO_DESCRIPTION "Shape LFO v0.13.1"
 static const _NT_factory kFactory={
  NT_MULTICHAR('S','L','F','2'),"Shape LFO",SLFO_DESCRIPTION,
  0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,

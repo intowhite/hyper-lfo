@@ -205,5 +205,57 @@ int main(){
   _NT_jsonParse ps(nullptr,0);assert(deserialise(b.s,ps));b.ui();
   assert(b.s->segments[3].morphTo==1+kTriangle && b.s->segments[1].trigger==0 && b.s->segments[0].trigger==1);
  }
- printf("PASS: Gate trigger mask, clock mult/div (internal + CV), Step loop, Init pattern, chainer, morphing\n");
+ // ---- v0.13.1: a Random morph target behaves like a Random shape.
+ {
+  Inst a;a.set(pSelected,4);a.ui();                    // segment 4: Ramp up
+  assert(!editHas(a.s,pRandomRefresh) && !editHas(a.s,pRandomSteps));
+  a.set(pMorphTo,1+kRandom);a.ui();
+  assert(editHas(a.s,pRandomRefresh) && editHas(a.s,pRandomSteps)); // controls appear
+  a.set(pRandomSteps,4);a.ui();a.v[pMorph]=100;
+  // Free (default): new values every time the segment starts.
+  float last=a.s->randomValues[3][0];int changes=0;
+  for(int pass=0;pass<4;pass++){a.samplesPerPass();if(a.s->randomValues[3][0]!=last)changes++;last=a.s->randomValues[3][0];}
+  assert(changes>=3);
+  // Loop: values hold; Regenerate segment (now visible) changes them at the pattern start.
+  a.set(pRandomRefresh,1);a.ui();assert(editHas(a.s,pRegenerateSegment));
+  const float held=a.s->randomValues[3][0];
+  a.samplesPerPass();a.samplesPerPass();assert(a.s->randomValues[3][0]==held);
+  a.set(pRegenerateSegment,1);a.ui();a.samplesPerPass();
+  assert(a.s->randomValues[3][0]!=held);
+  // Regenerate all reaches it too.
+  const float h2=a.s->randomValues[3][0];
+  a.set(pRegenerateAll,1);a.ui();a.samplesPerPass();assert(a.s->randomValues[3][0]!=h2);
+  // The Loop values are saved and restored.
+  _NT_jsonStream st(nullptr);a.use();serialise(a.s,st);st.finish();
+  Inst b;for(int i=0;i<pCount;i++)b.v[i]=a.v[i];b.use();
+  _NT_jsonParse ps(nullptr,0);assert(deserialise(b.s,ps));b.ui();
+  for(int j=0;j<=4;j++)assert(packRandom(b.s->randomValues[3][j])==packRandom(a.s->randomValues[3][j]));
+  // Morph target's own controls appear: Steps -> Steps/Contour/Curve, Square -> Pulse width.
+  Inst c;c.set(pSelected,3);c.ui();                    // segment 3: Sine
+  assert(!editHas(c.s,pSteps) && !editHas(c.s,pCurve) && !editHas(c.s,pWidth));
+  c.set(pMorphTo,1+kSteps);c.ui();assert(editHas(c.s,pSteps) && editHas(c.s,pContour) && editHas(c.s,pCurve));
+  c.set(pMorphTo,1+kSquare);c.ui();assert(editHas(c.s,pWidth) && !editHas(c.s,pSteps));
+  c.set(pMorphTo,0);c.ui();assert(!editHas(c.s,pWidth));
+  // Random -> Smooth random: Morph is a smoothness control over the same values.
+  Inst d;d.set(pShape,kRandom);d.set(pRandomSteps,4);d.set(pMorphTo,1+kSmoothRandom);d.ui();
+  d.v[pMorph]=0;const float hard=shapedAt(d.s,0,0.20f,1.0f);
+  d.v[pMorph]=100;const float soft=shapedAt(d.s,0,0.20f,1.0f);
+  d.v[pMorph]=50;const float mid=shapedAt(d.s,0,0.20f,1.0f);
+  assert(std::fabs(hard-randomWave(d.s,0,0.20f,false))<1e-6f);
+  assert(std::fabs(soft-randomWave(d.s,0,0.20f,true))<1e-6f);
+  assert(std::fabs(mid-0.5f*(hard+soft))<1e-5f);
+  // Edit page order: shape controls, Duration, Repeats, Timing, ... Morph to, actions.
+  const auto& ep=d.s->parameterPages->pages[kPageEdit];
+  int iDur=-1,iRep=-1,iTim=-1,iSq=-1,iMor=-1,iDup=-1;
+  for(int j=0;j<ep.numParams;j++){const int q=ep.params[j];
+   if(q==pRelDuration||q==pFixedDuration)iDur=j;
+   if(q==pRepeats)iRep=j;
+   if(q==pTiming)iTim=j;
+   if(q==pSquish)iSq=j;
+   if(q==pMorphTo)iMor=j;
+   if(q==pDuplicateSegment)iDup=j;}
+  assert(iDur<iRep && iRep<iTim && iTim<iSq && iSq<iMor && iMor<iDup);
+  assert(ep.params[ep.numParams-1]==pEditCount);       // Add/remove kept, last
+ }
+ printf("PASS: Gate trigger mask, clock mult/div (internal + CV), Step loop, Init pattern, chainer, morphing incl. random targets\n");
 }

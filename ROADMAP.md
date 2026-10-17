@@ -1,4 +1,4 @@
-# Hyper LFO roadmap (after v0.13.0)
+# Hyper LFO roadmap (after v0.13.1)
 
 ## Done
 
@@ -12,11 +12,11 @@
 - v0.10: Preset saving of all segment data; 16-pattern bank (per-pattern segments, Loop random values, Segments, Base division, Play mode); quantized switching by knob, Pattern CV (1 semitone per pattern from 0 V) and Next pattern trigger; Copy pattern.
 - v0.11: 32 segments; Duplicate / Delete segment (confirm controls); zoomed display with overview strip. v0.11.1: Next range (now Pattern loop) start/end for Next pattern in; Gate out also on the Output page.
 - v0.12: Scale quantizer (Major, Minor, Major/Minor pentatonic, Dorian, Mixolydian) with Root; zoom window; dimmer 0 V line. v0.12.1: 4-segment zoom window chosen.
-- v0.13: per-segment Gate trigger; Mult/div; Step loop; Init pattern; experimental chainer and morphing; test oscillator removed; names cleaned up.
+- v0.13: per-segment Gate trigger; Mult/div; Step loop; Init pattern; experimental chainer and morphing; test oscillator removed; names cleaned up. v0.13.1: pages Edit / Pattern / Output / Gate / Clock / Routing / Chain; Edit page reordered; Morph to shows its shape's controls and random targets refresh.
 
 ## Next, in order (launch)
 
-1. **NT hardware validation** of v0.11–v0.13, including worst-case CPU.
+1. **NT hardware validation** of v0.11–v0.13.1, including worst-case CPU.
 2. **Decide the experimental features:** keep, polish or remove the chainer and morphing.
 3. **Freeze:** final parameter list and preset format (append-only after launch), final name and plugin ID (`SLF2` now; check Expert Sleepers' ID convention).
 4. **Launch material:** tagged v1.0 release with the `.o`, README photos/screenshots, a "first patch" walkthrough.

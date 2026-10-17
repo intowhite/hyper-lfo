@@ -51,7 +51,8 @@ int main(){
  // v0.7.0: Edit is the first page, so the NT opens on "Edit segment".
  assert(page.params[0]==selected);
  assert(page.params[0]==selected && page.params[1]==shape &&
-        page.params[2]==rel && page.params[3]==17 /*Timing*/ && page.params[4]==repeats);
+        page.params[2]==curve && page.params[3]==rel && page.params[4]==repeats &&
+        page.params[5]==17 /*Timing*/);  // v0.13.1: shape controls, then Duration, Repeats, Timing
  assert(v[segments]==4 && v[selected]==1 && v[repeats]==1);
  set(selected,2);redraw();assert(v[shape]==0 && v[repeats]==4);
  set(pinch,88);set(shape,7);redraw();set(steps,12);set(contour,2);set(curve,87);
@@ -103,11 +104,11 @@ int main(){
  assert(hasRefresh&&!hasRegen);
  {const auto& ep=instance->parameterPages->pages[0];
   assert(ep.params[0]==selected && ep.params[1]==shape && ep.params[2]==refresh &&
-         ep.params[3]==randomSteps && ep.params[5]==17 && ep.params[6]==repeats);}
+         ep.params[3]==randomSteps && ep.params[5]==repeats && ep.params[6]==17);}
  {const int before=updates;set(refresh,1);assert(updates>before);
   const auto& ep=instance->parameterPages->pages[0];
   assert(ep.params[2]==refresh && ep.params[3]==regenSegment && ep.params[4]==randomSteps &&
-         ep.params[6]==17 && ep.params[7]==repeats);
+         ep.params[6]==repeats && ep.params[7]==17);
   set(refresh,0);
   for(int j=0;j<ep.numParams;j++)assert(ep.params[j]!=regenSegment);}
  set(refresh,1);set(selected,1);redraw();assert(v[refresh]==0);
@@ -115,7 +116,7 @@ int main(){
  set(regenSegment,1);redraw();assert(v[regenSegment]==0);
  set(regenAll,1);redraw();assert(v[regenAll]==0);
  set(regenIn,1);redraw();assert(v[regenIn]==1);
- assert(instance->parameterPages->numPages==6);
+ assert(instance->parameterPages->numPages==7);
  bool hasSteps=false;for(int j=0;j<instance->parameterPages->pages[0].numParams;j++)
   hasSteps|=instance->parameterPages->pages[0].params[j]==randomSteps;
  assert(hasSteps);
@@ -125,58 +126,48 @@ int main(){
  // Leaving Random restores Duration directly under Shape.
  set(shape,2);redraw();
  {const auto& ep=instance->parameterPages->pages[0];
-  assert(ep.params[2]==16 /*fixed Duration*/ && ep.params[3]==17 && ep.params[4]==repeats);}
+  assert(ep.params[2]==16 /*fixed Duration*/ && ep.params[3]==repeats && ep.params[4]==17);}
  // Clock page: source, clock in, PPQN, reset in. Defaults keep Internal.
  const int clockSource=32,clockIn=33,clockRate=34,resetIn=35;
- // v0.9.0 layout: Edit, Pattern, Clock, Output, Routing (all I/O on Routing).
+ // v0.13.1 layout (80/20): Edit, Pattern, Output, Gate, Clock, Routing, Chain.
  {const auto& pg=instance->parameterPages->pages;
-  assert(std::strcmp(pg[0].name,"Edit")==0 && std::strcmp(pg[1].name,"Pattern")==0 &&
-         std::strcmp(pg[2].name,"Clock")==0 && std::strcmp(pg[3].name,"Output")==0 &&
-         std::strcmp(pg[4].name,"Routing")==0 && std::strcmp(pg[5].name,"Chain")==0);
+  const char* names[]={"Edit","Pattern","Output","Gate","Clock","Routing","Chain"};
+  for(int i=0;i<7;i++)assert(std::strcmp(pg[i].name,names[i])==0);
   const int playMode=36,triggerIn=37,gateOut=38,gateMode=39,gateThr=40,gateOutMode=41,
    base=9,regenAllP=29,regenInP=30,bpmP=2,rangeP=3,amp=4,offset=5,outMode=7,test=8,slew=10;
   const int patternP=42,copyTo=43,copyP=44,patternCv=45,nextIn=46;
-  const int nextStart=49,nextEnd=50;
+  const int nextStart=49,nextEnd=50,quantizeP=51,rootP=52;
   const int segTrig=53,ratio=54,chain=55,chainLen=56,chainStep=57,chainPat=58,chainRep=59,
             morphTo=60,morph=61,initP=62;
-  const int patternPage[]={patternP,segments,playMode,base,morph,regenAllP,nextStart,nextEnd,
-                           copyTo,copyP,initP};
-  assert(pg[1].numParams==11);
-  for(int j=0;j<11;j++)assert(pg[1].params[j]==patternPage[j]);
-  const int chainPage[]={chain,chainLen,chainStep,chainPat,chainRep};
-  assert(pg[5].numParams==5);
-  for(int j=0;j<5;j++)assert(pg[5].params[j]==chainPage[j]);
+  auto check=[&](int page,std::initializer_list<int> want){
+   assert(pg[page].numParams==(int)want.size());
+   int j=0;for(int w:want)assert(pg[page].params[j++]==w);
+  };
+  check(1,{patternP,playMode,segments,base,morph,regenAllP,nextStart,nextEnd,copyTo,copyP,initP});
+  check(2,{rangeP,amp,offset,slew,quantizeP,rootP});
+  check(3,{gateOut,gateMode,gateThr,gateOutMode});
+  check(4,{clockSource,bpmP,ratio,clockRate});
+  check(5,{output,outMode,gateOut,gateOutMode,clockIn,resetIn,triggerIn,patternCv,nextIn,regenInP});
+  check(6,{chain,chainLen,chainStep,chainPat,chainRep});
   assert(v[segTrig]==1 && v[ratio]==4 && v[chain]==0 && v[morphTo]==0 && v[morph]==0 && v[initP]==0);
   assert(std::strcmp(instance->parameters[ratio].enumStrings[4],"x1")==0);
   assert(v[nextStart]==1 && v[nextEnd]==16);
-  assert(pg[2].numParams==4 && pg[2].params[0]==clockSource && pg[2].params[1]==bpmP &&
-         pg[2].params[2]==ratio && pg[2].params[3]==clockRate);
-  // Gate out is on Output (beside its settings) as well as on Routing.
-  // Output: Voltage, Amplitude, Offset, Quantize, Root, slew, Gate out/mode/threshold.
-  const int quantizeP=51,rootP=52;
-  const int outputPage[]={rangeP,amp,offset,quantizeP,rootP,slew,gateOut,gateMode,gateThr};
-  assert(pg[3].numParams==9);
-  for(int j=0;j<9;j++)assert(pg[3].params[j]==outputPage[j]);
   assert(v[quantizeP]==0 && v[rootP]==0);
   assert(std::strcmp(instance->parameters[49].name,"Pattern loop start")==0);
   assert(std::strcmp(instance->parameters[50].name,"Pattern loop end")==0);
-  const int routing[]={output,outMode,gateOut,gateOutMode,clockIn,resetIn,triggerIn,regenInP,
-                       patternCv,nextIn};
-  assert(pg[4].numParams==10);
-  for(int j=0;j<10;j++)assert(pg[4].params[j]==routing[j]);
-  // The removed test oscillator's slot is on no page.
   assert(v[patternP]==1 && v[copyTo]==2 && v[copyP]==0 && v[patternCv]==0 && v[nextIn]==0);
-  // Every parameter appears on exactly one page (the Edit page varies by shape).
+  // Each parameter is on one page, except Gate out / Gate out mode (Gate +
+  // Routing). The removed test oscillator's slot is on no page.
   int seen[64]={};
-  for(int pgi=1;pgi<6;pgi++)for(int j=0;j<pg[pgi].numParams;j++)seen[pg[pgi].params[j]]++;
+  for(int pgi=1;pgi<7;pgi++)for(int j=0;j<pg[pgi].numParams;j++)seen[pg[pgi].params[j]]++;
   for(int j=0;j<pg[0].numParams;j++)assert(pg[0].params[j]!=test);
   assert(seen[test]==0 && instance->parameters[test].max==0);
-  for(int j=0;j<64;j++)assert(seen[j]<=1 || (j==gateOut && seen[j]==2));
+  for(int j=0;j<64;j++)assert(seen[j]<=1 || ((j==gateOut || j==gateOutMode) && seen[j]==2));
   assert(v[gateOut]==0 && v[gateMode]==0 && v[gateThr]==50 && v[gateOutMode]==1);}
  assert(v[clockSource]==0 && v[clockIn]==0 && v[clockRate]==2 && v[resetIn]==0);
  assert(f->midiRealtime!=nullptr);
  // v0.8.0: Sequence page = Segments, Play mode, Trigger in. Default Loop.
  assert(v[36]==0 && v[37]==0); // Play mode Loop, Trigger in None
  assert(updates>0 && draws>0);
- printf("PASS: v0.13.0 shared editor, Edit-first, page layout incl. pattern controls\n");
+ printf("PASS: v0.13.1 shared editor, Edit-first, page layout incl. pattern controls\n");
 }

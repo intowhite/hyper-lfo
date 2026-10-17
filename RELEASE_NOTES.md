@@ -1,3 +1,23 @@
+# v0.13.1 — Menu reorganisation, random Morph to fix
+
+**Pages** (order chosen for the controls used most): **Edit, Pattern, Output, Gate, Clock, Routing, Chain**.
+- New **Gate** page: Gate out, Gate mode, Gate threshold, Gate out mode. Gate out and Gate out mode are also still on Routing (same parameters).
+- **Output** now holds only the CV output settings: Voltage range, Amplitude, Offset, Output slew, Quantize, Root, and comes right after Pattern.
+- **Pattern** lists Play mode right after Pattern.
+
+**Edit page order:** Edit segment, Shape, the shape's own controls (Refresh / Regenerate / Random steps, Pulse width, Steps / Contour, Curve), Duration, Repeats, Timing, Depth, Pinch, Pinch height, Warp, Squish, **Morph to**, Gate trigger, Duplicate, Delete, Reset, Add/remove.
+
+**Morph to**
+- The Edit page now shows the controls of both the Shape and the Morph to shape: e.g. Morph to Square adds Pulse width, Morph to Steps adds Steps/Contour/Curve.
+- **Fixed:** a Random or Smooth random Morph to target never got new values. It now follows Refresh like a Random segment: Free gives new values each time the segment starts; Loop holds them, with Regenerate segment and Regenerate all; Loop values are saved with the preset. Random steps, Refresh and Regenerate appear when Morph to is Random or Smooth random.
+- Random → Smooth random (or back) is allowed and works as a smoothness control over the same values.
+
+**Details**
+- No parameter IDs changed (still 63); presets from v0.13.0 load as before. Page order does not affect saved data.
+- CPU: DSP unchanged.
+
+Tested: nine host suites (new tests: Morph to visibility, random target refresh/regenerate/save, Random→Smooth random blend, Edit order, every page's contents) + sanitizers, ARM GNU 14.2 compile with no runtime helpers. CV output in Loop is still byte-identical to v0.6.1. **Disting NT hardware test required.**
+
 # v0.13.0 — Pre-launch features and cleanup
 
 **New**
