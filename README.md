@@ -4,7 +4,21 @@
 
 ![Building a pattern on the disting NT display: adding segments, Pinch, Morph to and Morph, then curving a staircase](media/shape_lfo_screen.gif)
 
-Shape LFO is a clocked modulation sequencer for the Expert Sleepers disting NT. Instead of one repeating waveform, you build a **chain of up to 32 shape segments**. Each segment has its own waveform, length, repeats and sculpting. The chain can loop, ping-pong, fire once per trigger like an envelope, or step forward one segment per trigger, all in time with the internal tempo, a CV clock or MIDI clock. A second output turns the movement into gates and triggers. Sixteen patterns live in one Shape LFO, switchable in time by hand, CV or trigger, and everything is saved with your NT preset.
+Most LFOs repeat one shape forever. Shape LFO lets you **chain up to 32 shapes into a pattern**, sculpt each one, and play it in time with your clock.
+
+## Features
+
+- **32-segment shape chains:** ramps, sine, triangle, square, highs and lows, staircases and random, each with its own length and repeats
+- **Sculpt every segment:** Curve, Pinch, Pinch height, Depth, Warp and Squish
+- **Morph** any segment toward a second shape with one knob or CV *(experimental)*
+- **Five play modes:** Loop, One-shot envelope, Step advance, Step loop and Ping-pong
+- **16 patterns per instance:** switch by knob, CV or trigger, always landing on the beat
+- **Random that behaves:** new values every pass, or a locked phrase you can regenerate on the next bar
+- **Gate and trigger output:** threshold gates, crossings, per-segment and ratchet triggers, end-of-pattern
+- **Scale quantizer:** Major, Minor, pentatonics, Dorian and Mixolydian in any key, with glide
+- **Locks to your clock:** internal, CV (1–48 PPQN) or MIDI with Start/Stop/Continue, plus Mult/div from /4 to x4
+- **See it all:** the display draws the real output for the whole pattern, with a playhead
+- **Saved with your preset:** all 16 patterns, light on CPU
 
 Version 0.13.2
 
