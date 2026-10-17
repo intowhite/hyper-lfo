@@ -63,7 +63,8 @@ Local build: `bash build.sh path/to/distingNT_API` (or `build.ps1 -ApiPath …` 
 
 ## Status
 
-- v0.13.2: faster sample loop (cached constants, inline fast path, quantizer table); output bit-identical. **Reported working on hardware. Current release.**
+- v1.0.0: first release, tagged `v1.0.0` (same code as v0.13.2). Parameters and preset format are append-only from here.
+- v0.13.2: faster sample loop (cached constants, inline fast path, quantizer table); output bit-identical. **Reported working on hardware.**
 - v0.13.1: menu reorganisation (Gate page, Output higher, Edit order), Morph to shows its controls, random Morph to target refreshes. Host + ARM validated. Awaiting NT hardware test.
 - v0.13.0: Gate trigger, Mult/div, Step loop, Init pattern, experimental chainer + morphing, test oscillator removed, names cleaned. Host + ARM validated. Awaiting NT hardware test.
 - v0.12.1: 4-segment zoom made standard (chosen on hardware).

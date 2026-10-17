@@ -1,4 +1,4 @@
-// Shape LFO v0.13.2 scale quantizer, 32 segments, duplicate/delete, zoomed view, pattern bank + preset saving, gate output, play modes, external clock for Expert Sleepers disting NT
+// Shape LFO v1.0.0 scale quantizer, 32 segments, duplicate/delete, zoomed view, pattern bank + preset saving, gate output, play modes, external clock for Expert Sleepers disting NT
 // Copyright (c) 2026 intowhite. MIT license. https://github.com/intowhite/shape-lfo
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
@@ -2047,7 +2047,7 @@ static bool deserialise(_NT_algorithm* alg,_NT_jsonParse& parse){
  }
  return true;
 }
-#define SLFO_DESCRIPTION "Shape LFO v0.13.2"
+#define SLFO_DESCRIPTION "Shape LFO v1.0.0"
 static const _NT_factory kFactory={
  NT_MULTICHAR('S','L','F','2'),"Shape LFO",SLFO_DESCRIPTION,
  0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,

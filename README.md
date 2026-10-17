@@ -21,7 +21,7 @@ Most LFOs repeat one shape forever. Shape LFO lets you **chain up to 32 shapes i
 - **See it all:** the display draws the real output for the whole pattern, with a playhead
 - **Saved with your preset:** all 16 patterns, light on CPU
 
-Version 0.13.2
+Version 1.0.0
 
 ---
 

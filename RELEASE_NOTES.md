@@ -1,3 +1,15 @@
+# v1.0.0 — First release
+
+Shape LFO 1.0: a clocked shape sequencer for the disting NT. Same code as v0.13.2, which was tested on the NT; only the version name changes.
+
+- Up to 32 shape segments per pattern, ten shapes, Curve, Pinch, Pinch height, Depth, Warp, Squish and Morph.
+- Loop, One-shot, Step advance, Step loop and Ping-pong.
+- 16 patterns with on-the-beat switching (knob, CV, trigger) and a pattern chainer.
+- Gate/trigger output, scale quantizer, internal / CV / MIDI clock with Mult/div.
+- Everything saved in the NT preset.
+
+From 1.0 on, the parameter list and preset format only grow (new parameters are appended), so presets made with 1.0 keep loading in later versions.
+
 # v0.13.2 — Faster sample loop, identical output
 
 No feature or sound changes. The per-sample code no longer re-derives settings that only change between segments or blocks:

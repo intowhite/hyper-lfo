@@ -1,4 +1,8 @@
-# v0.13.2 — Disting NT quick test checklist
+# v1.0.0 — Disting NT quick test checklist
+
+v1.0.0 is v0.13.2 with the version name changed: check the NT shows "Shape LFO v1.0.0" and that it plays as before.
+
+## From v0.13.2
 
 v0.13.2 only speeds up the sample loop; nothing should look or sound different.
 

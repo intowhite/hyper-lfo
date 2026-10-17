@@ -1,4 +1,4 @@
-# Shape LFO roadmap (after v0.13.2)
+# Shape LFO roadmap (after v1.0.0)
 
 ## Done
 
@@ -16,7 +16,7 @@
 
 ## Next, in order (launch)
 
-1. **Done:** v0.13.2 is the release candidate, tested on the NT. The chainer and morphing are kept as standard features.
+1. **Done:** v1.0.0 released (v0.13.2 code, tested on the NT). The chainer and morphing are standard features.
 2. **Freeze:** final parameter list and preset format (append-only after launch), final name and plugin ID (`SLF2` now; check Expert Sleepers' ID convention).
 3. **Launch material:** tagged v1.0 release with the `.o`, README photos/screenshots, a "first patch" walkthrough.
 
