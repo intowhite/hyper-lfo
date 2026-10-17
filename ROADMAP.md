@@ -1,57 +1,42 @@
-# Shape LFO — development roadmap
+# Hyper LFO roadmap (after v0.13.0)
 
-This is a staged plan, not a claim that unfinished features are present.
+## Done
 
-## v0.1 — working on-device prototype
-- [x] One CV output, internal BPM, looping
-- [x] Ramp down/up, sine, square
-- [x] 1–16 equal-duration segments
-- [x] 1–8 repeats per segment
-- [x] Live waveform display, selected segment, playhead
-- [x] Native NT parameter-driven editing
-- [x] Source code and host smoke tests; official ARM build script
-- [x] Loading and editor functionality confirmed on actual NT (v0.1.1)
-- [ ] **Confirm moving CV and BPM response on NT** (v0.1.2 integer clock + 2 Hz diagnostics)
-- [x] Put Segments / Edit segment only on Edit page (v0.1.2)
+- 32-segment shape chain: relative/fixed durations with triplets, repeats, live preview; shared editor (63 NT parameters), opens on Edit segment.
+- Shapes: Sine, Ramp up/down, Triangle, Square, High/Low, Steps (Up/Down/Hump/Valley), Random and Smooth random.
+- Curve, Pinch, Pinch height, Depth, per-segment Warp/Squish.
+- Random: Free/Loop, 1–16 steps, Regenerate segment (Loop only), Regenerate all, Regenerate in; always quantized to pattern starts.
+- v0.7: CV clock (1–48 PPQN), Reset, MIDI clock with Start/Stop/Continue; phase-locked, holds when the clock stops.
+- v0.8: Play modes: Loop, One-shot (always retriggers), Step advance, Ping-pong; Trigger in; tempo-following.
+- v0.9: Pages Edit / Pattern / Clock / Output / Routing; gate/trigger output (Above, Below, Rising, Falling, Both, Segment start, Every repeat, Pattern end), % threshold, automatic hysteresis, 10 ms triggers.
+- v0.10: Preset saving of all segment data; 16-pattern bank (per-pattern segments, Loop random values, Segments, Base division, Play mode); quantized switching by knob, Pattern CV (1 semitone per pattern from 0 V) and Next pattern trigger; Copy pattern.
+- v0.11: 32 segments; Duplicate / Delete segment (confirm controls); zoomed display with overview strip. v0.11.1: Next range (now Pattern loop) start/end for Next pattern in; Gate out also on the Output page.
+- v0.12: Scale quantizer (Major, Minor, Major/Minor pentatonic, Dorian, Mixolydian) with Root; zoom window; dimmer 0 V line. v0.12.1: 4-segment zoom window chosen.
+- v0.13: per-segment Gate trigger; Mult/div; Step loop; Init pattern; experimental chainer and morphing; test oscillator removed; names cleaned up.
 
-## v0.2 — timing and expressive shaping
-- [ ] Musical base division and **independent segment duration** (1/16, 1/8, 1/4, bars, multiples)
-- [ ] Bipolar curvature for ramp/other contours
-- [ ] **Amplitude Start / End** across repetitions (decaying/growing bursts)
-- [ ] Direct faster add/select/edit workflow, insertion and deletion anywhere
-- [ ] Shape invert, amplitude/baseline handling
+## Next, in order (launch)
 
-## v0.3 — complex and random contours
-- [ ] Step generator with count, directional step ramp/slope and curvature
-- [ ] Staircases, humps, valleys, zigzags, stepped mixed shapes
-- [ ] Sample-and-hold random (fresh values on each execution)
-- [ ] Smooth random, noise texture
-- [ ] Optional skew, phase, offset per segment
-- [ ] More shape preview polish
+1. **NT hardware validation** of v0.11–v0.13, including worst-case CPU.
+2. **Decide the experimental features:** keep, polish or remove the chainer and morphing.
+3. **Freeze:** final parameter list and preset format (append-only after launch), final name and plugin ID (`SLF2` now; check Expert Sleepers' ID convention).
+4. **Launch material:** tagged v1.0 release with the `.o`, README photos/screenshots, a "first patch" walkthrough.
 
-## v0.4 — performance patterns
-- [ ] 16 or more saved pattern slots independent from whole-NT presets
-- [ ] Previous/next pattern with optional quantized switch
-- [ ] External trigger advance, reset and direct selection
-- [ ] **8-entry Pattern Chain**, each entry references a pattern and specifies repeat count
-- [ ] Chain looping/one-shot, pattern copy/paste, queued-pattern display
+## Parked
 
-## v0.5 — synchronization and playback
-- [ ] Port the proven internal / external CV / MIDI clock behavior from Clocked Wavetable
-- [ ] CV clock formats including 1/16, 24 PPQN and beat/bar pulse conventions
-- [ ] Sync resets and proper clock-stop handling
-- [ ] Loop / ping-pong / triggered one-shot envelope modes
-- [ ] Global output amplitude/offset refinements and reliable state storage
+- **SysEx bank dump/load** as an optional backup/sharing route (the SDK can send and receive SysEx).
 
-## v1.0 — richer release
-- [ ] Evaluate 4 independent CV channels (subject to hardware UI and CPU)
-- [ ] Advanced optional per-point sculpting for hard-to-generate shapes
-- [ ] Reusable custom shape templates
-- [ ] Fast performance switching and documentation
+## Possible follow-ups (only if wanted after hardware testing)
 
-## Architecture safeguards
-- Keep distinct: (A) a single shape cycle; (B) segment duration and shape repeats; (C) whole-pattern repeats; (D) Pattern Chain repetitions.
-- Complex shapes are parameter-driven generators first, hand-edited points only as an advanced option.
-- Abrupt jumps between segments remain allowed by design.
-- Random patterns should generate new values every execution, not become fixed on pattern repeat unless optionally configured later.
-- Never force browser-only editing; editing **on the disting NT** must remain a complete workflow.
+- Clock: CV Run/Stop gate, MIDI Song Position Pointer, align conventions with Clocked Wavetable.
+- Play modes: One-shot "Retrigger: Off".
+- Undo for destructive segment actions.
+- Move segment left/right.
+
+## Further exploration
+
+- Internal pattern bake/cache and WAV export for Clocked Wavetable bank playback; preserve exact timing and hard steps. The current SDK has no file-writing API for plugins, so export would need a SysEx dump converted on a computer, or a separate web tool.
+- Morphing beyond the experimental version: per-segment amounts, whole-pattern crossfading.
+- More step contours, shape-specific smoothing, a precise point editor, custom templates.
+- Up to four independent modulation channels.
+
+Keep NT navigation predictable, individual shape editing fast, and hardware test checklists brief.

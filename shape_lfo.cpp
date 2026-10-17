@@ -1,7 +1,5 @@
-// Variant build: 4-segment zoom window. Upload as shape_lfo.cpp to build it.
-#define SLFO_ZOOM_WINDOW 4
-// Shape LFO v0.12.0 scale quantizer, 32 segments, duplicate/delete, zoomed view, pattern bank + preset saving, gate output, play modes, external clock for Expert Sleepers disting NT
-// Copyright (c) 2026. MIT license.
+// Shape LFO v0.13.0 scale quantizer, 32 segments, duplicate/delete, zoomed view, pattern bank + preset saving, gate output, play modes, external clock for Expert Sleepers disting NT
+// Copyright (c) 2026 intowhite. MIT license. https://github.com/intowhite/hyper-lfo
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
 #include <distingnt/api.h>
@@ -17,9 +15,10 @@ constexpr int kMaxSegments = 32;
 // Segments 0..15 seed their random tables exactly as before v0.11.
 constexpr int kLegacySegments = 16;
 // Display: above kZoomWindow segments, show a window of kZoomWindow segments
-// that follows Edit segment. Build with -DSLFO_ZOOM_WINDOW=4 for a 4-segment window.
+// that follows Edit segment (chosen on hardware: 4). The tests also build
+// with -DSLFO_ZOOM_WINDOW=8 to keep the window logic size-independent.
 #ifndef SLFO_ZOOM_WINDOW
-#define SLFO_ZOOM_WINDOW 8
+#define SLFO_ZOOM_WINDOW 4
 #endif
 constexpr int kZoomWindow = SLFO_ZOOM_WINDOW;
 constexpr int kZoomAbove = kZoomWindow;
@@ -33,7 +32,6 @@ static char const* const kShapes[] = {"Ramp down", "Ramp up", "Sine", "Square", 
 static char const* const kStepContours[] = {"Up", "Down", "Hump", "Valley"};
 static char const* const kRandomRefresh[] = {"Free", "Loop"};
 static char const* const kRanges[] = {"-5 to +5V", "0 to 5V", "0 to 10V"};
-static char const* const kTestModes[] = {"Off", "2 Hz square"};
 // Triplets appear beside their matching straight divisions for fast editing.
 // As requested, this build does not migrate saved settings from earlier builds.
 static char const* const kBaseDivisions[] = {"1/32", "1/32T", "1/16", "1/16T", "1/8", "1/8T", "1/4", "1/4T", "1/2", "1/2T", "1 bar", "1 bar T"};
@@ -48,10 +46,7 @@ static constexpr int kBaseUnits[] = {12,8,24,16,48,32,96,64,192,128,384,256};
 static constexpr int kRelativeFactors[] = {1,2,4,8,16,32}; // /4: 1/4..8
 static constexpr int kFixedUnits[] = {12,8,24,16,48,32,96,64,192,128,384,256,768,512,1536,1024};
 static constexpr int kSlewMilliseconds[] = {0,1,2,5,10,20,40,80,160,320,640,1000};
-static char const* const kAmpAnchors[] = {"Centered", "From zero"};
 // The signed Pinch Height control is +100=top, 0=center, -100=bottom.
-// v0.4 reverses the old Pull direction for clockwise=up. Saved non-neutral
-// Pull values need to be negated to recreate the old sound.
 // On 0..10V: Top=10V, Center=5V, Bottom=0V.
 static constexpr int kSlewCount=sizeof(kSlewMilliseconds)/sizeof(kSlewMilliseconds[0]);
 // External clock. Each pulse is an exact whole number of 1/384-bar units.
@@ -71,8 +66,20 @@ static constexpr uint16_t kScaleMasks[] = {0x000,
     0x6AD,  // Dorian      0 2 3 5 7 9 10
     0x6B5}; // Mixolydian  0 2 4 5 7 9 10
 static char const* const kRootNotes[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
-static char const* const kPlayModes[] = {"Loop", "One-shot", "Step advance", "Ping-pong"};
-enum PlayMode { kPlayLoop=0, kPlayOneShot=1, kPlayStep=2, kPlayPingPong=3, kPlayUnset=255 };
+static char const* const kPlayModes[] = {"Loop", "One-shot", "Step advance", "Ping-pong", "Step loop"};
+enum PlayMode { kPlayLoop=0, kPlayOneShot=1, kPlayStep=2, kPlayPingPong=3, kPlayStepLoop=4,
+                kPlayUnset=255 };
+static inline bool stepMode(int m){return m==kPlayStep || m==kPlayStepLoop;}
+static inline bool triggeredMode(int m){return m==kPlayOneShot || stepMode(m);}
+// Clock multiply/divide: the pattern runs num/den times as fast as the clock.
+static char const* const kClockRatios[] = {"/4", "/3", "/2", "x2/3", "x1", "x3/2", "x2", "x3", "x4"};
+static constexpr uint32_t kRatioNum[] = {1,1,1,2,1,3,2,3,4};
+static constexpr uint32_t kRatioDen[] = {4,3,2,3,1,2,1,1,1};
+static constexpr int kRatioDefault = 4;
+static char const* const kOffOn[] = {"Off", "On"};
+// EXPERIMENTAL (morphing): 0 = off, n = crossfade toward shape n-1.
+static char const* const kMorphShapes[] = {"Off", "Ramp down", "Ramp up", "Sine", "Square", "High",
+                                           "Low", "Triangle", "Steps", "Random", "Smooth random"};
 static char const* const kGateModes[] = {"Above", "Below", "Rising", "Falling", "Both",
                                          "Segment start", "Every repeat", "Pattern end"};
 enum GateMode { kGateAbove=0, kGateBelow, kGateRising, kGateFalling, kGateBoth,
@@ -87,7 +94,8 @@ enum SharedParameter {
  // v0.7.1: Edit segment is parameter 0 so the NT selects it when the
  // algorithm is added (the NT starts on parameter 0, not the first page).
  pSelected=0,pSegments,pBpm,pRange,pAmplitude,pOffset,pOutput,pOutputMode,
- pTest,pBaseDivision,pSlew,pWarp,pSquish,
+ // pUnused8: the removed test oscillator; its slot is kept so IDs stay put.
+ pUnused8,pBaseDivision,pSlew,pWarp,pSquish,
  pShape,pRepeats,pRelDuration,pFixedDuration,pTiming,pCurve,pPinch,pHeight,
  pDepth,pWidth,pSteps,pContour,pEditCount,pReset,
  pRandomRefresh,pRegenerateSegment,pRegenerateAll,pRegenerateIn,pRandomSteps,
@@ -104,18 +112,23 @@ enum SharedParameter {
  // v0.11.1: appended.
  pNextRangeStart,pNextRangeEnd,
  // v0.12.0: appended.
- pQuantize,pRoot,pCount
+ pQuantize,pRoot,
+ // v0.13.0: appended.
+ pSegmentTrigger,pClockRatio,
+ pChain,pChainLength,pChainStep,pChainPattern,pChainRepeats, // EXPERIMENTAL chainer
+ pMorphTo,pMorph,                                            // EXPERIMENTAL morphing
+ pInitPattern,pCount
 };
 static const _NT_parameter kSharedDefaults[pCount]={
  {"Edit segment",1,kMaxSegments,1,kNT_unitNone,0,nullptr},
  {"Segments",1,kMaxSegments,4,kNT_unitNone,0,nullptr},
  {"Internal BPM",20,300,120,kNT_unitBPM,0,nullptr},
- {"Voltage",0,2,0,kNT_unitEnum,0,kRanges},
+ {"Voltage range",0,2,0,kNT_unitEnum,0,kRanges},
  {"Amplitude",0,100,100,kNT_unitPercent,0,nullptr},
  {"Offset",-5000,5000,0,kNT_unitMillivolts,0,nullptr},
  {"CV out",1,kNT_lastBus,13,kNT_unitCvOutput,0,nullptr},
- {"Output mode",0,1,1,kNT_unitOutputMode,0,nullptr},
- {"Test oscillator",0,1,0,kNT_unitEnum,0,kTestModes},
+ {"CV out mode",0,1,1,kNT_unitOutputMode,0,nullptr},
+ {"(unused)",0,0,0,kNT_unitNone,0,nullptr},
  {"Base division",0,11,6,kNT_unitEnum,0,kBaseDivisions},
  {"Output slew",0,kSlewCount-1,0,kNT_unitEnum,0,kSlewTimes},
  {"Warp",-45,45,0,kNT_unitNone,0,nullptr},
@@ -127,23 +140,23 @@ static const _NT_parameter kSharedDefaults[pCount]={
  {"Timing",0,1,0,kNT_unitEnum,0,kModes},
  {"Curve",-100,100,0,kNT_unitNone,0,nullptr},
  {"Pinch",0,100,50,kNT_unitHasStrings,0,nullptr},
- {"Pinch Height",-100,100,0,kNT_unitHasStrings,0,nullptr},
+ {"Pinch height",-100,100,0,kNT_unitHasStrings,0,nullptr},
  {"Depth",0,100,100,kNT_unitPercent,0,nullptr},
- {"Pulse Width",5,95,50,kNT_unitPercent,0,nullptr},
+ {"Pulse width",5,95,50,kNT_unitPercent,0,nullptr},
  {"Steps",2,16,8,kNT_unitNone,0,nullptr},
  {"Contour",0,3,0,kNT_unitEnum,0,kStepContours},
- {"Add/Remove",1,kMaxSegments,4,kNT_unitNone,0,nullptr},
+ {"Add/remove",1,kMaxSegments,4,kNT_unitNone,0,nullptr},
  {"Reset segment",0,1,0,kNT_unitConfirm,0,nullptr},
  {"Refresh",0,1,0,kNT_unitEnum,0,kRandomRefresh},
  {"Regenerate segment",0,1,0,kNT_unitConfirm,0,nullptr},
  {"Regenerate all",0,1,0,kNT_unitConfirm,0,nullptr},
- {"Regen trigger in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr},
+ {"Regenerate in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr},
  {"Random steps",1,16,1,kNT_unitNone,0,nullptr},
  {"Clock source",0,2,kClockInternal,kNT_unitEnum,0,kClockSources},
  {"Clock in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr},
  {"Clock PPQN",0,6,2,kNT_unitEnum,0,kClockRates},
  {"Reset in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr},
- {"Play mode",0,3,kPlayLoop,kNT_unitEnum,0,kPlayModes},
+ {"Play mode",0,4,kPlayLoop,kNT_unitEnum,0,kPlayModes},
  {"Trigger in",0,kNT_lastBus,0,kNT_unitCvInput,0,nullptr},
  {"Gate out",0,kNT_lastBus,0,kNT_unitCvOutput,0,nullptr},
  {"Gate mode",0,7,kGateAbove,kNT_unitEnum,0,kGateModes},
@@ -159,15 +172,29 @@ static const _NT_parameter kSharedDefaults[pCount]={
  {"Pattern loop start",1,kNumPatterns,1,kNT_unitNone,0,nullptr},
  {"Pattern loop end",1,kNumPatterns,kNumPatterns,kNT_unitNone,0,nullptr},
  {"Quantize",0,6,0,kNT_unitEnum,0,kScales},
- {"Root",0,11,0,kNT_unitEnum,0,kRootNotes}
+ {"Root",0,11,0,kNT_unitEnum,0,kRootNotes},
+ {"Gate trigger",0,1,1,kNT_unitEnum,0,kOffOn},
+ {"Mult/div",0,8,kRatioDefault,kNT_unitEnum,0,kClockRatios},
+ {"Chain",0,1,0,kNT_unitEnum,0,kOffOn},
+ {"Chain length",1,8,4,kNT_unitNone,0,nullptr},
+ {"Chain step",1,8,1,kNT_unitNone,0,nullptr},
+ {"Step pattern",1,kNumPatterns,1,kNT_unitNone,0,nullptr},
+ {"Step repeats",1,16,1,kNT_unitNone,0,nullptr},
+ {"Morph to",0,10,0,kNT_unitEnum,0,kMorphShapes},
+ {"Morph",0,100,0,kNT_unitPercent,0,nullptr},
+ {"Init pattern",0,1,0,kNT_unitConfirm,0,nullptr}
 };
 // Edit is the first page so the NT opens on "Edit segment" when loaded.
-enum PageIndex { kPageEdit=0,kPagePattern,kPageClock,kPageOutput,kPageRouting,kPageCount };
+enum PageIndex { kPageEdit=0,kPagePattern,kPageClock,kPageOutput,kPageRouting,
+                 kPageChain, // EXPERIMENTAL chainer, last so it is easy to remove
+                 kPageCount };
 struct Segment {
  uint8_t shape,repeats,timing,relative,fixed,pinch,depth,width,steps,contour,randomRefresh,randomSteps;
  int8_t curve,height,warp,squish;
+ uint8_t trigger;   // gate Segment start / Every repeat fire on this segment
+ uint8_t morphTo;   // EXPERIMENTAL: 0 = off, n = morph toward shape n-1
 };
-static Segment defaultSegment(){return {kRampDown,1,0,2,4,50,100,50,8,0,0,1,0,0,0,0};}
+static Segment defaultSegment(){return {kRampDown,1,0,2,4,50,100,50,8,0,0,1,0,0,0,0,1,0};}
 // One pattern in the bank (DRAM). The playing pattern lives in the SRAM
 // working copy (ShapeLFO::segments/randomValues); the bank is only touched
 // at quantized switches, Copy, and preset save/load. Random values are
@@ -181,7 +208,7 @@ struct ShapeLFO : public _NT_algorithm {
  Segment segments[kMaxSegments];
  _NT_parameterPage pages[kPageCount];
  _NT_parameterPages pageSet;
- uint8_t editParams[20];
+ uint8_t editParams[24];
  int16_t countRequest;
  bool syncCount,updatingCount,resetPending,syncingEditor,pendingEditorSync;
  bool duplicatePending,deletePending;
@@ -198,7 +225,6 @@ struct ShapeLFO : public _NT_algorithm {
  uint32_t segmentTicks,lastThreshold;
  uint8_t currentSegment;
  float previewPhase;
- uint32_t testSamples;
  float slewPrevious;
  bool slewStarted;
  // Random tables contain one voltage per step plus the next interpolation
@@ -241,11 +267,17 @@ struct ShapeLFO : public _NT_algorithm {
  bool patternOverride,patternHostSync,syncingPattern,copyPending,nextPatternHigh;
  uint8_t ovCount,ovBase,ovMode;
  int8_t lastPatternCv;
+ bool initPending;
+ // EXPERIMENTAL chainer: entry/pass counters run on the audio side at
+ // pattern starts; the step editor values are written from draw().
+ uint8_t chainPattern[8],chainRepeats[8];
+ uint8_t chainEntry,chainPass;
+ bool chainRestart,chainSyncPending,syncingChain;
  ShapeLFO():countRequest(-1),syncCount(false),updatingCount(false),resetPending(false),
   syncingEditor(false),pendingEditorSync(false),duplicatePending(false),deletePending(false),viewFirst(0),resetRegenSegmentPending(false),
   resetRegenAllPending(false),regenerateGateHigh(false),pendingRandomRegeneration(0),pendingRegenerateAll(0),
   segmentTicks(0),lastThreshold(0),currentSegment(0),
-  previewPhase(0),testSamples(0),slewPrevious(0),slewStarted(false),rngState(0x9e3779b9u),
+  previewPhase(0),slewPrevious(0),slewStarted(false),rngState(0x9e3779b9u),
   clockBudget(0),extIncrement(0),extPeriod(0),samplesSincePulse(0),longIntervals(0),
   activeClockSource(kClockInternal),havePulse(false),clockGateHigh(false),resetGateHigh(false),
   transportRunning(true),midiClocksPending(0),midiTransport(0),
@@ -253,7 +285,9 @@ struct ShapeLFO : public _NT_algorithm {
   events(0),gateCompHigh(false),gateStarted(false),lastRepeatIndex(-1),gateTriggerRemaining(0),
   bank(nullptr),requestedPattern(-1),currentPattern(0),patternOverride(false),patternHostSync(false),
   syncingPattern(false),copyPending(false),nextPatternHigh(false),ovCount(4),ovBase(6),ovMode(0),
-  lastPatternCv(-1){
+  lastPatternCv(-1),initPending(false),chainEntry(0),chainPass(0),chainRestart(true),
+  chainSyncPending(false),syncingChain(false){
+  for(int i=0;i<8;++i){chainPattern[i]=static_cast<uint8_t>(i);chainRepeats[i]=1;}
   uint32_t extra=0x6d2b79f5u; // segments 17-32 use their own seed stream
   for(int i=0;i<kMaxSegments;++i){
    segments[i]=defaultSegment();
@@ -269,26 +303,29 @@ struct ShapeLFO : public _NT_algorithm {
   segments[3].shape=kRampUp;
   parameters=kSharedDefaults;v=nullptr;vIncludingCommon=nullptr;
   // v0.9.0 layout: each page has one job. All inputs/outputs on Routing.
-  static const uint8_t patternParams[]={pPattern,pSegments,pPlayMode,pBaseDivision,pRegenerateAll,
-                                        pNextRangeStart,pNextRangeEnd,pCopyTo,pCopyPattern};
-  static const uint8_t clockParams[]={pClockSource,pBpm,pClockRate};
+  static const uint8_t patternParams[]={pPattern,pSegments,pPlayMode,pBaseDivision,pMorph,
+                                        pRegenerateAll,pNextRangeStart,pNextRangeEnd,
+                                        pCopyTo,pCopyPattern,pInitPattern};
+  static const uint8_t clockParams[]={pClockSource,pBpm,pClockRatio,pClockRate};
   // Gate out appears here (next to its settings) AND on Routing; it is
   // the same parameter on both pages.
   static const uint8_t outputParams[]={pRange,pAmplitude,pOffset,pQuantize,pRoot,pSlew,
                                        pGateOut,pGateMode,pGateThreshold};
   static const uint8_t routingParams[]={pOutput,pOutputMode,pGateOut,pGateOutputMode,pClockIn,
                                         pResetIn,pTriggerIn,pRegenerateIn,pPatternCvIn,
-                                        pNextPatternIn,pTest};
+                                        pNextPatternIn};
   // Populate the Edit page before the NT's very first UI draw. No
   // callback can rely on v[] until the host has attached its values.
   const uint8_t initialEdit[]={pSelected,pShape,pRelDuration,pTiming,pRepeats,pCurve,
       pPinch,pHeight,pDepth,pWarp,pSquish,pDuplicateSegment,pDeleteSegment,pReset,pEditCount};
   for(int i=0;i<15;++i)editParams[i]=initialEdit[i];
   pages[kPageEdit]={"Edit",15,0,{0,0},editParams};
-  pages[kPagePattern]={"Pattern",9,0,{0,0},patternParams};
-  pages[kPageClock]={"Clock",3,0,{0,0},clockParams};
+  static const uint8_t chainParams[]={pChain,pChainLength,pChainStep,pChainPattern,pChainRepeats};
+  pages[kPagePattern]={"Pattern",11,0,{0,0},patternParams};
+  pages[kPageClock]={"Clock",4,0,{0,0},clockParams};
   pages[kPageOutput]={"Output",9,0,{0,0},outputParams};
-  pages[kPageRouting]={"Routing",11,0,{0,0},routingParams};
+  pages[kPageRouting]={"Routing",10,0,{0,0},routingParams};
+  pages[kPageChain]={"Chain",5,0,{0,0},chainParams};
   pageSet={kPageCount,pages};parameterPages=&pageSet;
  }
 };
@@ -303,7 +340,7 @@ static int baseDivision(const ShapeLFO* s){
 }
 static int playModeOf(const ShapeLFO* s){
  const int m=s->patternOverride?s->ovMode:s->v[pPlayMode];
- return (m<kPlayLoop||m>kPlayPingPong)?kPlayLoop:m;
+ return (m<kPlayLoop||m>kPlayStepLoop)?kPlayLoop:m;
 }
 static int selected(const ShapeLFO* s){
  int n=s->v[pSelected]-1;return n<0?0:(n>=kMaxSegments?kMaxSegments-1:n);
@@ -342,8 +379,13 @@ static void updateEditPage(ShapeLFO* s,bool informHost){
  else if(g.shape==kSteps){
   s->editParams[next++]=pSteps;s->editParams[next++]=pContour;s->editParams[next++]=pCurve;
  }else if(g.shape==kRampDown || g.shape==kRampUp)s->editParams[next++]=pCurve;
+ s->editParams[next++]=pMorphTo; // EXPERIMENTAL
  s->editParams[next++]=pPinch;s->editParams[next++]=pHeight;s->editParams[next++]=pDepth;
  s->editParams[next++]=pWarp;s->editParams[next++]=pSquish;
+ // Gate trigger only matters while the gate fires on segments/repeats.
+ if(s->v && s->v[pGateOut]>0 &&
+    (s->v[pGateMode]==kGateSegment || s->v[pGateMode]==kGateRepeat))
+  s->editParams[next++]=pSegmentTrigger;
  s->editParams[next++]=pDuplicateSegment;s->editParams[next++]=pDeleteSegment;
  s->editParams[next++]=pReset;s->editParams[next++]=pEditCount;
  s->pages[kPageEdit].numParams=static_cast<uint8_t>(next);
@@ -361,6 +403,7 @@ static void pushEditorValues(ShapeLFO* s){
  setHostParam(s,pWarp,g.warp);setHostParam(s,pSquish,g.squish);
  setHostParam(s,pRandomRefresh,g.randomRefresh);
  setHostParam(s,pRandomSteps,g.randomSteps);
+ setHostParam(s,pSegmentTrigger,g.trigger);setHostParam(s,pMorphTo,g.morphTo);
  s->syncingEditor=false;
  updateEditPage(s,true);
 }
@@ -376,6 +419,8 @@ static void pullEditorValue(ShapeLFO* s,int param){
   case pWarp:g.warp=n;break;case pSquish:g.squish=n;break;
   case pRandomRefresh:g.randomRefresh=n;break;
   case pRandomSteps:g.randomSteps=n;break;
+  case pSegmentTrigger:g.trigger=n?1:0;break;
+  case pMorphTo:g.morphTo=static_cast<uint8_t>(n<0?0:(n>10?10:n));break;
  }
 }
 // ---- Pattern bank helpers. The empty asm statement in each copy loop
@@ -471,6 +516,21 @@ static void parameterChanged(_NT_algorithm* alg,int param){
   return;
  }
  if(param==pPattern){if(!s->syncingPattern)requestPattern(s,s->v[pPattern]-1);return;}
+ if(param==pInitPattern){if(s->v[pInitPattern])s->initPending=true;return;}
+ if(param==pSegmentTrigger || param==pMorphTo){if(!s->syncingEditor)pullEditorValue(s,param);return;}
+ // Showing/hiding Gate trigger on the Edit page follows the gate setup.
+ if(param==pGateOut || param==pGateMode){updateEditPage(s,true);return;}
+ // EXPERIMENTAL chainer step editor.
+ if(param==pChainStep){s->chainSyncPending=true;return;}
+ if(param==pChainPattern || param==pChainRepeats){
+  if(!s->syncingChain){
+   int st=s->v[pChainStep]-1;st=st<0?0:(st>7?7:st);
+   if(param==pChainPattern){int x=s->v[pChainPattern]-1;s->chainPattern[st]=static_cast<uint8_t>(x<0?0:(x>=kNumPatterns?kNumPatterns-1:x));}
+   else {int x=s->v[pChainRepeats];s->chainRepeats[st]=static_cast<uint8_t>(x<1?1:(x>16?16:x));}
+  }
+  return;
+ }
+ if(param==pChain){s->chainRestart=true;return;}
  if(param==pCopyPattern){if(s->v[pCopyPattern])s->copyPending=true;return;}
  // A hand edit of a per-pattern control ends the post-switch override.
  if((param==pSegments || param==pBaseDivision || param==pPlayMode) && !s->syncingPattern)
@@ -489,7 +549,6 @@ static void parameterChanged(_NT_algorithm* alg,int param){
   pullEditorValue(s,param);
   if(param==pShape || param==pTiming)updateEditPage(s,true);
  }
- if(param==pTest && s->v[pTest])s->testSamples=0;
  if(param==pSlew && s->v[pSlew]==0)s->slewStarted=false;
 }
 // Move segment `from` (with its random table) into slot `to`.
@@ -539,6 +598,28 @@ static void consumeEditRequest(ShapeLFO* s){
  }
  if(s->patternOverride && s->v[pSegments]==s->ovCount &&
     s->v[pBaseDivision]==s->ovBase && s->v[pPlayMode]==s->ovMode)s->patternOverride=false;
+ if(s->initPending){
+  // Init pattern: the playing pattern back to the factory default.
+  s->initPending=false;
+  if(s->v[pInitPattern]){
+   setHostParam(s,pInitPattern,0);
+   StoredPattern fresh;makeDefaultPattern(fresh,s->rngState);
+   loadWorking(s,fresh);
+   s->pendingRandomRegeneration=0;
+   s->updatingCount=true;
+   setHostParam(s,pSegments,fresh.count);setHostParam(s,pBaseDivision,fresh.base);
+   setHostParam(s,pPlayMode,fresh.mode);setHostParam(s,pSelected,1);
+   s->updatingCount=false;
+   s->syncCount=true;s->pendingEditorSync=true;
+  }
+ }
+ if(s->chainSyncPending){
+  s->chainSyncPending=false;
+  int st=s->v[pChainStep]-1;st=st<0?0:(st>7?7:st);
+  s->syncingChain=true;
+  setHostParam(s,pChainPattern,s->chainPattern[st]+1);setHostParam(s,pChainRepeats,s->chainRepeats[st]);
+  s->syncingChain=false;
+ }
  if(s->copyPending){
   s->copyPending=false;
   if(s->v[pCopyPattern]){
@@ -715,7 +796,7 @@ static inline float waveform(int shape,float t,int curve=0,int width=50,
     if(shape==kSteps) {
         if(stepCount<2)stepCount=2;
         if(stepCount>16)stepCount=16;
-        if(contour<0 || contour>3)contour=0; // legacy Alternate -> Up
+        if(contour<0 || contour>3)contour=0;
         return curvedStep(t,stepCount,contour,curve);
     }
     if(shape==kHigh)return 1.0f;
@@ -745,7 +826,6 @@ static inline float amplitudeAt(const ShapeLFO* s,int slot,float inside) {
 }
 // Pinch Height: -100 Bottom, 0 Center, +100 Top. The magnitude
 // determines the distance from the output-voltage midpoint.
-// Old non-neutral Pull parameter values have their direction reversed.
 static inline float anchorAt(const ShapeLFO* s,int slot) {
     // Positive height is UP on the NT: invert the original anchor coordinate.
     return -clampf(static_cast<float>(s->segments[slot].height)*0.01f,-1.0f,1.0f);
@@ -805,9 +885,21 @@ static inline float shapedAt(const ShapeLFO* s,int slot,float inside,float envel
     float p=inside*static_cast<float>(r);
     p-=static_cast<float>(static_cast<int>(p));
  p=shapedPhase(p,50+seg.warp,seg.squish);
- const float value=(seg.shape==kRandom || seg.shape==kSmoothRandom)
+ float value=(seg.shape==kRandom || seg.shape==kSmoothRandom)
    ?randomWave(s,slot,p,seg.shape==kSmoothRandom)
    :waveform(seg.shape,p,seg.curve,seg.width,seg.steps,seg.contour);
+ // EXPERIMENTAL morphing: crossfade toward "Morph to" by the global Morph
+ // amount (map it to CV on the NT). Costs a second waveform only when on.
+ if(seg.morphTo) {
+  const int amount=s->v[pMorph];
+  if(amount>0) {
+   const int target=seg.morphTo-1;
+   const float other=(target==kRandom || target==kSmoothRandom)
+     ?randomWave(s,slot,p,target==kSmoothRandom)
+     :waveform(target,p,seg.curve,seg.width,seg.steps,seg.contour);
+   value+=(other-value)*static_cast<float>(amount>100?100:amount)*0.01f;
+  }
+ }
  return value*envelope;
 }
 // Output range in volts for the selected Voltage setting (display and gate).
@@ -883,8 +975,15 @@ static float evaluateAtUnits(const ShapeLFO* s,float position,int* activeSlot) {
 }
 // Changes to master division or the current segment's duration rescale
 // its stored phase on the next block, rather than restarting the shape.
+static inline int clockRatio(const ShapeLFO* s){
+    const int r=s->v[pClockRatio];return (r<0||r>8)?kRatioDefault:r;
+}
+// One 1/384-bar unit = 5 * sampleRate * den ticks; the clocks advance by
+// num-scaled amounts, so x1 is exactly the original arithmetic.
 static uint32_t thresholdFor(const ShapeLFO* s,int slot,uint32_t sampleRate) {
-    return 5u*sampleRate*static_cast<uint32_t>(durationUnits(s,slot));
+    const uint64_t t=5ull*sampleRate*static_cast<uint64_t>(durationUnits(s,slot))*
+                     kRatioDen[clockRatio(s)];
+    return t>0xF0000000ull?0xF0000000u:static_cast<uint32_t>(t);
 }
 static inline uint32_t safeSampleRate() {
     return (NT_globals.sampleRate >= 8000 && NT_globals.sampleRate <= 192000)
@@ -897,8 +996,26 @@ struct Playhead { uint32_t ticks; int slot; uint32_t threshold; float invThresho
 // this is exactly the v0.6.1 arithmetic (at most one boundary per sample).
 // Everything that happens at a pattern start: queued random regeneration
 // (applied to the pattern that is finishing), then a queued pattern switch.
-static inline void patternStart(ShapeLFO* s){
+// EXPERIMENTAL chainer: at each pattern start, count a pass of the current
+// entry; after its repeats, request the next entry's pattern. A Reset (or
+// MIDI Start, or switching the chain on) restarts at entry 1.
+static void chainAdvance(ShapeLFO* s,bool restart){
+ if(!s->v[pChain]){s->chainRestart=true;return;}
+ int len=s->v[pChainLength];len=len<1?1:(len>8?8:len);
+ if(restart || s->chainRestart || s->chainEntry>=len){
+  s->chainRestart=false;s->chainEntry=0;s->chainPass=0;
+  requestPattern(s,s->chainPattern[0]);
+  return;
+ }
+ if(++s->chainPass>=s->chainRepeats[s->chainEntry]){
+  s->chainPass=0;
+  s->chainEntry=static_cast<uint8_t>((s->chainEntry+1)%len);
+  requestPattern(s,s->chainPattern[s->chainEntry]);
+ }
+}
+static inline void patternStart(ShapeLFO* s,bool restart=false){
  applyQueuedRandom(s);
+ chainAdvance(s,restart);
  applyQueuedPattern(s);
 }
 static inline void parkPlayhead(ShapeLFO* s,Playhead& p) {
@@ -913,6 +1030,13 @@ static inline void advancePlayhead(ShapeLFO* s,Playhead& p,uint32_t amount,uint3
         const int mode=s->activePlayMode;
         // Step advance: each segment plays once, then waits for a trigger.
         if(mode==kPlayStep){parkPlayhead(s,p);return;}
+        if(mode==kPlayStepLoop) {
+            // Step loop: the segment repeats until the next trigger.
+            p.ticks-=p.threshold;
+            enterSegment(s,p.slot);
+            s->events|=kEventSegment;
+            continue;
+        }
         if(s->reverse) {
             // Ping-pong backward pass: segments in reverse order.
             p.ticks-=p.threshold;
@@ -959,14 +1083,19 @@ static inline void advancePlayhead(ShapeLFO* s,Playhead& p,uint32_t amount,uint3
 }
 // Reset returns to the start of segment 1 immediately. That is a whole-
 // pattern boundary, so queued regeneration and Free refresh apply there.
-static void resetPlayhead(ShapeLFO* s,Playhead& p,uint32_t sampleRate) {
+// `restart` (Reset in, MIDI Start) also restarts the experimental chain;
+// a One-shot trigger restart counts as an ordinary pattern start.
+static void resetPlayhead(ShapeLFO* s,Playhead& p,uint32_t sampleRate,bool restart=false) {
     s->holding=false;s->reverse=false;
     s->events|=kEventSegment;
     if(p.slot!=0 || p.ticks!=0) {
         p.slot=0;p.ticks=0;
-        patternStart(s);
+        patternStart(s,restart);
         enterSegment(s,0);
-    } else applyQueuedPattern(s); // already at the start: switch only
+    } else {
+        if(restart)chainAdvance(s,true);
+        applyQueuedPattern(s); // already at the start: switch only
+    }
     p.threshold=thresholdFor(s,0,sampleRate);
     p.invThreshold=1.0f/static_cast<float>(p.threshold);
 }
@@ -1010,12 +1139,13 @@ static void triggerPlayhead(ShapeLFO* s,Playhead& p,uint32_t sampleRate,
         // Always retriggers: restart from segment 1, even mid-pass.
         if(p.slot==0 && p.ticks==0 && !s->holding)return; // same-sample duplicate
         resetPlayhead(s,p,sampleRate);
-    } else if(mode==kPlayStep) {
+    } else if(stepMode(mode)) {
         s->holding=false;s->reverse=false;
         ++p.slot;
         if(p.slot>=count(s)) {
             p.slot=0;
             patternStart(s); // pattern boundary
+            if(mode==kPlayStepLoop)s->events|=kEventPatternEnd;
         }
         p.ticks=0;
         enterSegment(s,p.slot);
@@ -1087,13 +1217,15 @@ static inline void gateSample(GateBlock& g,const ShapeLFO* s,int i,
         g.comparator=true;
         fire=(g.mode==kGateRising || g.mode==kGateBoth);
     }
-    if(g.mode==kGateSegment)fire=(ev&kEventSegment)!=0u;
+    // Segment start / Every repeat fire only on segments whose Gate trigger is on.
+    if(g.mode==kGateSegment)fire=(ev&kEventSegment)!=0u && s->segments[slot].trigger;
     else if(g.mode==kGatePatternEnd)fire=(ev&kEventPatternEnd)!=0u;
     else if(g.mode==kGateRepeat) {
         int r=s->segments[slot].repeats;r=r<1?1:(r>8?8:r);
         int idx=static_cast<int>(fractional*static_cast<float>(r));
         idx=idx>=r?r-1:idx;
-        fire=(ev&kEventSegment)!=0u || (g.lastRepeat>=0 && idx!=g.lastRepeat);
+        fire=((ev&kEventSegment)!=0u || (g.lastRepeat>=0 && idx!=g.lastRepeat)) &&
+             s->segments[slot].trigger;
         g.lastRepeat=idx;
     }
     if(fire)g.remaining=g.triggerSamples;
@@ -1179,7 +1311,7 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
         const bool firstBlock=s->activePlayMode==kPlayUnset;
         s->activePlayMode=static_cast<uint8_t>(mode);
         if(mode!=kPlayPingPong)s->reverse=false;
-        if(mode==kPlayLoop || mode==kPlayPingPong)s->holding=false;
+        if(mode==kPlayLoop || mode==kPlayPingPong || mode==kPlayStepLoop)s->holding=false;
         if(firstBlock && (mode==kPlayOneShot || mode==kPlayStep)) {
             p.slot=count(s)-1;
             p.threshold=thresholdFor(s,p.slot,sampleRate);
@@ -1189,14 +1321,15 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
         }
     }
     const bool external=source!=kClockInternal;
-    const uint32_t pulseTicks=5u*sampleRate*static_cast<uint32_t>(clockUnitsPerPulse(s,source));
+    const uint32_t ratioNum=kRatioNum[clockRatio(s)];
+    const uint32_t pulseTicks=5u*sampleRate*static_cast<uint32_t>(clockUnitsPerPulse(s,source))*ratioNum;
     const uint32_t midiTransport=__atomic_exchange_n(&s->midiTransport,0u,__ATOMIC_RELAXED);
     const uint32_t midiClocks=__atomic_exchange_n(&s->midiClocksPending,0u,__ATOMIC_RELAXED);
     if(source==kClockMidi) {
         // MIDI arrives between blocks, so it is applied at block start.
         if(midiTransport&0x10u) {
             s->transportRunning=true;
-            resetPlayhead(s,p,sampleRate);
+            resetPlayhead(s,p,sampleRate,true);
             s->clockBudget=0; // wait for the downbeat clock after Start
         }
         const uint32_t event=midiTransport&0x0Fu;
@@ -1207,7 +1340,7 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
             for(uint32_t c=0;c<midiClocks;++c)clockPulse(s,p,each,pulseTicks,0.2f,sampleRate);
         }
     }
-    if(!external || !s->havePulse)s->extIncrement=static_cast<uint32_t>(8*bpm);
+    if(!external || !s->havePulse)s->extIncrement=static_cast<uint32_t>(8*bpm)*ratioNum;
     const int clockBus=s->v[pClockIn];
     const float* clockIn=(source==kClockCv && clockBus>0 && clockBus<=kNT_lastBus)
         ? buses+(clockBus-1)*frames:nullptr;
@@ -1219,7 +1352,7 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     const uint32_t resetWindow=sampleRate/500; // 2 ms: clock just before reset
     bool clockHigh=s->clockGateHigh,resetHigh=s->resetGateHigh;
     const int triggerBus=s->v[pTriggerIn];
-    const float* triggerIn=((mode==kPlayOneShot || mode==kPlayStep) && triggerBus>0 && triggerBus<=kNT_lastBus)
+    const float* triggerIn=(triggeredMode(mode) && triggerBus>0 && triggerBus<=kNT_lastBus)
         ? buses+(triggerBus-1)*frames:nullptr;
     bool triggerHigh=s->triggerGateHigh;
     // ---- Gate/trigger output. Skipped entirely when Gate out is None.
@@ -1250,8 +1383,6 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
 #define SLFO_TO_P() do{p.ticks=ticks;p.slot=slot;p.threshold=threshold;p.invThreshold=invThreshold;}while(0)
 #define SLFO_FROM_P() do{ticks=p.ticks;slot=p.slot;threshold=p.threshold;invThreshold=p.invThreshold;\
     holding=s->holding;reverse=s->reverse;events|=s->events;s->events=0;}while(0)
-    uint32_t testSamples=s->testSamples;
-    const uint32_t halfTestCycle=sampleRate/4;
     const int slewChoice=s->v[pSlew];
     float maxSlew=0.0f;
     if(slewChoice>0 && slewChoice<kSlewCount) {
@@ -1261,7 +1392,7 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     }
     float previous=s->slewPrevious;
     bool started=s->slewStarted;
-    const uint32_t clockIncrement=static_cast<uint32_t>(8*bpm);
+    const uint32_t clockIncrement=static_cast<uint32_t>(8*bpm)*ratioNum;
     const int gateBus=s->v[pRegenerateIn];
     const float* gate=(gateBus>0 && gateBus<=kNT_lastBus)
         ? buses+(gateBus-1)*frames:nullptr;
@@ -1285,7 +1416,7 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
                 const float v=resetIn[i];
                 if(!resetHigh && v>=1.0f) {
                     resetHigh=true;
-                    SLFO_TO_P();resetPlayhead(s,p,sampleRate);SLFO_FROM_P();
+                    SLFO_TO_P();resetPlayhead(s,p,sampleRate,true);SLFO_FROM_P();
                     // A clock that arrived up to 2 ms early counts as the downbeat.
                     if(external)s->clockBudget=(s->havePulse && s->samplesSincePulse<=resetWindow)
                         ? pulseTicks:0u;
@@ -1311,22 +1442,13 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
                     SLFO_FROM_P();
                 } else if(triggerHigh && v<=0.5f)triggerHigh=false;
             } else triggerHigh=false;
-            float wave;
-            float envelope=1.0f;
-            float fractional=0.0f;
-            if(s->v[pTest]) {
-                wave=testSamples<halfTestCycle?1.0f:-1.0f;
-                ++testSamples;
-                if(testSamples>=halfTestCycle*2)testSamples=0;
-            } else {
-                fractional=static_cast<float>(ticks)*invThreshold;
-                if(reverse)fractional=1.0f-fractional; // Ping-pong backward pass
-                // Never reach 1.0: the repeat wrap would turn it back into 0.0
-                // (a held One-shot end or a reversed segment start).
-                if(fractional>0.999999f)fractional=0.999999f;
-                envelope=amplitudeAt(s,slot,fractional);
-                wave=shapedAt(s,slot,fractional,envelope);
-            }
+            float fractional=static_cast<float>(ticks)*invThreshold;
+            if(reverse)fractional=1.0f-fractional; // Ping-pong backward pass
+            // Never reach 1.0: the repeat wrap would turn it back into 0.0
+            // (a held One-shot end or a reversed segment start).
+            if(fractional>0.999999f)fractional=0.999999f;
+            const float envelope=amplitudeAt(s,slot,fractional);
+            const float wave=shapedAt(s,slot,fractional,envelope);
             float volts=scaleOutput(s,wave,envelope,slot);
             if constexpr(decltype(tag)::value){gateSample(gb,s,i,volts,fractional,slot,events);events=0;}
             if(maxSlew>0.0f) {
@@ -1373,7 +1495,6 @@ static void step(_NT_algorithm* alg,float* buses,int numFramesBy4) {
     float inSegment=static_cast<float>(p.ticks)/static_cast<float>(p.threshold);
     if(s->reverse)inSegment=1.0f-inSegment;
     s->previewPhase=(elapsed+inSegment*durationUnits(s,p.slot))/static_cast<float>(total);
-    s->testSamples=testSamples;
     s->slewPrevious=previous;
     s->slewStarted=started;
 }
@@ -1426,6 +1547,7 @@ static bool draw(_NT_algorithm* alg) {
         const int32_t pending=__atomic_load_n(&s->requestedPattern,__ATOMIC_RELAXED);
         if(pending>=0){*lp++='>';appendInt(lp,pending+1);}
     }
+    if(s->v[pChain]){*lp++=' ';*lp++='C';appendInt(lp,s->chainEntry+1);} // EXPERIMENTAL
     *lp++=' ';
     // External clock status: measured tempo, "--" with no clock, STOP
     // after a MIDI Stop. Internal clock shows only the pattern length.
@@ -1448,11 +1570,12 @@ static bool draw(_NT_algorithm* alg) {
     const int playMode=playModeOf(s);
     if(playMode==kPlayOneShot)appendText(r,"1SHOT ");
     else if(playMode==kPlayStep)appendText(r,"STEP ");
+    else if(playMode==kPlayStepLoop)appendText(r,"SLOOP ");
     else if(playMode==kPlayPingPong)appendText(r,"PING ");
     *r++='S';appendInt(r,choice+1);
     *r++=' ';*r++='x';appendInt(r,repeatsAt(s,choice));
     *r++=' ';appendText(r,modeAt(s,choice)?"FIX":"REL");*r=0;
-    NT_drawText(251,58,s->v[pTest]?"TEST 2HZ":right,14,kNT_textRight,kNT_textTiny);
+    NT_drawText(251,58,right,14,kNT_textRight,kNT_textTiny);
     // Long patterns (more than kZoomAbove segments) show a window of
     // kZoomWindow segments that follows Edit segment, plus an overview strip
     // of the whole pattern. Shorter patterns keep the full view.
@@ -1560,6 +1683,7 @@ static int parameterString(_NT_algorithm*,int param,int value,char* buffer){
  else if(param==pCopyPattern)appendText(p,value==0?"Ready":"Copy now");
  else if(param==pDuplicateSegment)appendText(p,value==0?"Ready":"Duplicate");
  else if(param==pDeleteSegment)appendText(p,value==0?"Ready":"Delete");
+ else if(param==pInitPattern)appendText(p,value==0?"Ready":"Init");
  else return 0;
  *p=0;return static_cast<int>(p-buffer);
 }
@@ -1573,6 +1697,11 @@ static int parameterString(_NT_algorithm*,int param,int value,char* buffer){
 //        values: the steps plus the glide endpoint), "" otherwise. Free mode
 //        rerolls on every entry, so its values are not saved. Loading
 //        accepts 1-17 values (v0.10 always wrote 17).
+//   x:   (v0.13) 4 hex chars per segment: Gate trigger, Morph to. Only
+//        written when some segment differs from the default (trigger on,
+//        no morph). Missing = defaults.
+//   chain (top level, v0.13, EXPERIMENTAL): 32 hex chars = 8 x (pattern,
+//        repeats) bytes.
 // Loading validates every field; anything missing or invalid falls back
 // to the default, so a damaged preset can never produce illegal values.
 static const char kHex[]="0123456789abcdef";
@@ -1607,6 +1736,7 @@ static Segment segmentFromBytes(const uint8_t* b){
  g.height=static_cast<int8_t>(clampi(static_cast<int8_t>(b[13]),-100,100));
  g.warp=static_cast<int8_t>(clampi(static_cast<int8_t>(b[14]),-45,45));
  g.squish=static_cast<int8_t>(clampi(static_cast<int8_t>(b[15]),-100,100));
+ g.trigger=1;g.morphTo=0; // saved separately in "x"
  return g;
 }
 static bool sameSegment(const Segment& a,const Segment& b){
@@ -1654,9 +1784,30 @@ static void serialise(_NT_algorithm* alg,_NT_jsonStream& st){
    st.addString(r);
   }
   st.closeArray();
+  bool extras=false;
+  for(int i=0;i<kMaxSegments;++i)if(d.seg[i].trigger!=1 || d.seg[i].morphTo)extras=true;
+  if(extras){
+   char x[kMaxSegments*4+1];char* w=x;
+   for(int i=0;i<kMaxSegments;++i){
+    const uint8_t t=d.seg[i].trigger,m=d.seg[i].morphTo;
+    *w++=kHex[t>>4];*w++=kHex[t&15];*w++=kHex[m>>4];*w++=kHex[m&15];
+   }
+   *w=0;
+   st.addMemberName("x");st.addString(x);
+  }
   st.closeObject();
  }
  st.closeArray();
+ st.addMemberName("chain");
+ {
+  char c[33];char* w=c;
+  for(int i=0;i<8;++i){
+   const uint8_t a=s->chainPattern[i],r=s->chainRepeats[i];
+   *w++=kHex[a>>4];*w++=kHex[a&15];*w++=kHex[r>>4];*w++=kHex[r&15];
+  }
+  *w=0;
+  st.addString(c);
+ }
 }
 // Parse one pattern object into `d` (or just consume it if d is null).
 static bool parsePattern(_NT_jsonParse& parse,StoredPattern* d,uint32_t& rng){
@@ -1667,7 +1818,19 @@ static bool parsePattern(_NT_jsonParse& parse,StoredPattern* d,uint32_t& rng){
   int x;const char* str=nullptr;
   if(parse.matchName("n")){if(!parse.number(x))return false;if(d)d->count=static_cast<uint8_t>(clampi(x,1,kMaxSegments));}
   else if(parse.matchName("b")){if(!parse.number(x))return false;if(d)d->base=static_cast<uint8_t>(clampi(x,0,11));}
-  else if(parse.matchName("m")){if(!parse.number(x))return false;if(d)d->mode=static_cast<uint8_t>(clampi(x,kPlayLoop,kPlayPingPong));}
+  else if(parse.matchName("m")){if(!parse.number(x))return false;if(d)d->mode=static_cast<uint8_t>(clampi(x,kPlayLoop,kPlayStepLoop));}
+  else if(parse.matchName("x")){
+   if(!parse.string(str))return false;
+   if(d && str){
+    for(int i=0;i<kMaxSegments;++i){
+     int v4[4];bool ok=true;
+     for(int k=0;k<4;++k){const char ch=str[i*4+k];if(!ch){ok=false;break;}v4[k]=hexValue(ch);if(v4[k]<0){ok=false;break;}}
+     if(!ok)break;
+     d->seg[i].trigger=static_cast<uint8_t>((v4[0]*16+v4[1])?1:0);
+     d->seg[i].morphTo=static_cast<uint8_t>(clampi(v4[2]*16+v4[3],0,10));
+    }
+   }
+  }
   else if(parse.matchName("seg")){
    if(!parse.string(str))return false;
    if(d && str){
@@ -1716,6 +1879,20 @@ static bool deserialise(_NT_algorithm* alg,_NT_jsonParse& parse){
  for(int m=0;m<members;++m){
   if(parse.matchName("format")){int f;if(!parse.number(f))return false;}
   else if(parse.matchName("pattern")){int c;if(!parse.number(c))return false;current=clampi(c,0,kNumPatterns-1);}
+  else if(parse.matchName("chain")){
+   const char* str=nullptr;
+   if(!parse.string(str))return false;
+   if(str){
+    for(int i=0;i<8;++i){
+     int v4[4];bool ok=true;
+     for(int k=0;k<4;++k){const char ch=str[i*4+k];if(!ch){ok=false;break;}v4[k]=hexValue(ch);if(v4[k]<0){ok=false;break;}}
+     if(!ok)break;
+     s->chainPattern[i]=static_cast<uint8_t>(clampi(v4[0]*16+v4[1],0,kNumPatterns-1));
+     s->chainRepeats[i]=static_cast<uint8_t>(clampi(v4[2]*16+v4[3],1,16));
+    }
+    s->chainSyncPending=true;
+   }
+  }
   else if(parse.matchName("bank")){
    int n;
    if(!parse.numberOfArrayElements(n))return false;
@@ -1737,11 +1914,7 @@ static bool deserialise(_NT_algorithm* alg,_NT_jsonParse& parse){
  }
  return true;
 }
-#if SLFO_ZOOM_WINDOW==8
-#define SLFO_DESCRIPTION "Shape LFO v0.12.0"
-#else
-#define SLFO_DESCRIPTION "Shape LFO v0.12.0 zoom4"
-#endif
+#define SLFO_DESCRIPTION "Shape LFO v0.13.0"
 static const _NT_factory kFactory={
  NT_MULTICHAR('S','L','F','2'),"Shape LFO",SLFO_DESCRIPTION,
  0,nullptr,nullptr,nullptr,calculateRequirements,construct,parameterChanged,step,

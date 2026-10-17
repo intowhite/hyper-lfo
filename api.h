@@ -53,3 +53,5 @@ extern "C" int32_t NT_algorithmIndex(const _NT_algorithm*);
 extern "C" void NT_updateParameterPages(uint32_t);
 extern "C" void NT_drawText(int,int,const char*,int=15,_NT_textAlignment=kNT_textLeft,_NT_textSize=kNT_textNormal);
 extern "C" void NT_drawShapeI(_NT_shape,int,int,int,int,int=15);
+extern "C" uint32_t NT_parameterOffset(void);
+extern "C" void NT_setParameterFromUi(uint32_t,uint32_t,int16_t);
