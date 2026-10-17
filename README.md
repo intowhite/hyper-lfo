@@ -1,4 +1,8 @@
-# Shape LFO (Hyper LFO) for disting NT
+# Shape LFO
+
+*A clocked shape sequencer for the Expert Sleepers disting NT.*
+
+![Shape LFO on the disting NT display: four segments with Warp, Squish, Pinch and Morph moving](media/shape_lfo_loop.gif)
 
 Shape LFO is a clocked modulation sequencer for the Expert Sleepers disting NT. Instead of one repeating waveform, you build a **chain of up to 32 shape segments**. Each segment has its own waveform, length, repeats and sculpting. The chain can loop, ping-pong, fire once per trigger like an envelope, or step forward one segment per trigger, all in time with the internal tempo, a CV clock or MIDI clock. A second output turns the movement into gates and triggers. Sixteen patterns live in one Shape LFO, switchable in time by hand, CV or trigger, and everything is saved with your NT preset.
 
@@ -8,7 +12,7 @@ Version 0.13.2
 
 ## Installation
 
-1. Download `shape_lfo.o` from the [latest release](https://github.com/intowhite/hyper-lfo/releases/latest).
+1. Download `shape_lfo.o` from the [latest release](https://github.com/intowhite/shape-lfo/releases/latest).
 2. Copy it to the `/programs/plug-ins/` folder on the disting NT's microSD card.
 3. Restart the NT, then add **Shape LFO** from the algorithm list (it is under Utility).
 
@@ -26,6 +30,8 @@ A new Shape LFO opens on the **Edit** page with **Edit segment** selected and pl
 | 4 | Ramp up | 1 |
 
 Turn **Edit segment** to choose a segment, then change its **Shape**, **Duration** and **Repeats**. The display redraws the whole pattern as you edit. Use **Add/remove** to change how many segments there are.
+
+![Building a pattern: adding segments, Pinch, Morph to and Morph, then curving a staircase](media/shape_lfo_build.gif)
 
 ---
 
@@ -316,7 +322,7 @@ See [ROADMAP.md](ROADMAP.md) for what is planned before and after version 1.0.
 
 ## Issues and feedback
 
-Report bugs and suggest features on [GitHub Issues](https://github.com/intowhite/hyper-lfo/issues).
+Report bugs and suggest features on [GitHub Issues](https://github.com/intowhite/shape-lfo/issues).
 
 ## Building from source
 

@@ -1,6 +1,6 @@
 # Development notes
 
-Repository: https://github.com/intowhite/hyper-lfo (GitHub account: `intowhite`).
+Repository: https://github.com/intowhite/shape-lfo (GitHub account: `intowhite`).
 
 ## Build
 

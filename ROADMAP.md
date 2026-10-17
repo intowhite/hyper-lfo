@@ -1,4 +1,4 @@
-# Hyper LFO roadmap (after v0.13.2)
+# Shape LFO roadmap (after v0.13.2)
 
 ## Done
 

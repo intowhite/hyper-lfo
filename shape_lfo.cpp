@@ -1,5 +1,5 @@
 // Shape LFO v0.13.2 scale quantizer, 32 segments, duplicate/delete, zoomed view, pattern bank + preset saving, gate output, play modes, external clock for Expert Sleepers disting NT
-// Copyright (c) 2026 intowhite. MIT license. https://github.com/intowhite/hyper-lfo
+// Copyright (c) 2026 intowhite. MIT license. https://github.com/intowhite/shape-lfo
 // A deliberately small, hardware-oriented shape sequence prototype.
 // Uses the public distingNT C++ API (firmware/API v13+).
 #include <distingnt/api.h>
