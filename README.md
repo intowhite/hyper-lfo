@@ -6,8 +6,6 @@
 
 **▶ [Watch the demo video on YouTube](https://youtu.be/z5jZhQpu3OE)**
 
-[![Shape LFO demo video](https://img.youtube.com/vi/z5jZhQpu3OE/hqdefault.jpg)](https://youtu.be/z5jZhQpu3OE)
-
 Most LFOs repeat one shape forever. Shape LFO lets you **chain up to 32 shapes into a pattern**, sculpt each one, and play it in time with your clock.
 
 ## Features
